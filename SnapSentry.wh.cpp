@@ -2,9 +2,9 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.0
-// @author          Mario0318
-// @github          https://github.com/Mario0318
+// @version         0.4.3
+// @author          mario0318
+// @github          https://github.com/mario0318
 // @include         windhawk.exe
 // @compilerOptions -lole32 -lshell32 -lcomctl32 -lwindowscodecs -lruntimeobject -ladvapi32 -luuid
 // ==/WindhawkMod==
@@ -419,7 +419,7 @@ static bool ClipboardImage(const std::wstring& path) {
 // (CoRegisterClassObject) for the process that wants to handle button clicks.
 // ============================================================================
 
-static constexpr wchar_t kAppUserModelId[] = L"Mario0318.SnapSentry";
+static constexpr wchar_t kAppUserModelId[] = L"mario0318.SnapSentry";
 static constexpr wchar_t kShortcutName[] = L"SnapSentry.lnk";
 
 // Generated once for this mod; do not reuse elsewhere and do not regenerate --
@@ -479,60 +479,109 @@ static bool ShortcutHasCorrectProperties(IShellLinkW* link) {
 // Creates (or repairs) %APPDATA%\Microsoft\Windows\Start Menu\Programs\SnapSentry.lnk
 // pointing at the current windhawk.exe, tagged with our AUMID and activator CLSID.
 // Idempotent: does nothing if a correctly-tagged shortcut already exists.
-static bool EnsureAumidRegistered() {
-    PWSTR programs = nullptr;
-    if (FAILED(SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &programs))) {
+// True only if a shortcut already exists at the path and carries our exact AUMID
+// and activator CLSID. Uses its own throwaway object so a failed load never
+// touches the object we create the shortcut with.
+static bool ShortcutExistsAndValid(const std::wstring& path) {
+    if (GetFileAttributesW(path.c_str()) == INVALID_FILE_ATTRIBUTES) {
         return false;
     }
-    std::wstring path = std::wstring(programs) + L"\\" + kShortcutName;
-    CoTaskMemFree(programs);
-
     IShellLinkW* link = nullptr;
     if (FAILED(CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
                                 IID_PPV_ARGS(&link)))) {
         return false;
     }
-
     bool ok = false;
     IPersistFile* file = nullptr;
-    do {
-        if (FAILED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
-            break;
+    if (SUCCEEDED(link->QueryInterface(IID_PPV_ARGS(&file)))) {
+        if (SUCCEEDED(file->Load(path.c_str(), STGM_READ))) {
+            ok = ShortcutHasCorrectProperties(link);
         }
-        if (SUCCEEDED(file->Load(path.c_str(), STGM_READ)) &&
-            ShortcutHasCorrectProperties(link)) {
-            ok = true;
-            break;  // Already correctly registered.
-        }
-
-        WCHAR exePath[MAX_PATH];
-        if (!GetModuleFileNameW(nullptr, exePath, ARRAYSIZE(exePath))) {
-            break;
-        }
-        link->SetPath(exePath);
-        link->SetArguments(L"");
-        link->SetDescription(L"SnapSentry (Windhawk)");
-
-        IPropertyStore* store = nullptr;
-        if (FAILED(link->QueryInterface(IID_PPV_ARGS(&store)))) {
-            break;
-        }
-        bool propsOk =
-            SetStringProp(store, PKEY_AppUserModel_ID, kAppUserModelId) &&
-            SetClsidProp(store, PKEY_AppUserModel_ToastActivatorCLSID,
-                        CLSID_SnapSentryToastActivator) &&
-            SUCCEEDED(store->Commit());
-        store->Release();
-        if (!propsOk) {
-            break;
-        }
-
-        ok = SUCCEEDED(file->Save(path.c_str(), TRUE));
-    } while (false);
-
-    if (file) {
         file->Release();
     }
+    link->Release();
+    return ok;
+}
+
+static bool EnsureAumidRegistered() {
+    PWSTR programs = nullptr;
+    HRESULT hr = SHGetKnownFolderPath(FOLDERID_Programs, 0, nullptr, &programs);
+    if (FAILED(hr)) {
+        Wh_Log(L"AUMID: SHGetKnownFolderPath failed 0x%08lx", hr);
+        return false;
+    }
+    std::wstring path = std::wstring(programs) + L"\\" + kShortcutName;
+    CoTaskMemFree(programs);
+
+    if (ShortcutExistsAndValid(path)) {
+        return true;  // Already registered correctly.
+    }
+
+    WCHAR exePath[MAX_PATH];
+    if (!GetModuleFileNameW(nullptr, exePath, ARRAYSIZE(exePath))) {
+        Wh_Log(L"AUMID: GetModuleFileName failed %lu", GetLastError());
+        return false;
+    }
+
+    // Create the shortcut on a fresh object (the documented pattern).
+    IShellLinkW* link = nullptr;
+    hr = CoCreateInstance(CLSID_ShellLink, nullptr, CLSCTX_INPROC_SERVER,
+                          IID_PPV_ARGS(&link));
+    if (FAILED(hr)) {
+        Wh_Log(L"AUMID: CoCreateInstance(ShellLink) failed 0x%08lx", hr);
+        return false;
+    }
+
+    bool ok = false;
+    do {
+        hr = link->SetPath(exePath);
+        if (FAILED(hr)) {
+            Wh_Log(L"AUMID: IShellLink::SetPath failed 0x%08lx", hr);
+            break;
+        }
+        hr = link->SetArguments(L"");
+        if (FAILED(hr)) {
+            Wh_Log(L"AUMID: IShellLink::SetArguments failed 0x%08lx", hr);
+            break;
+        }
+        hr = link->SetDescription(L"SnapSentry (Windhawk)");
+        if (FAILED(hr)) {
+            Wh_Log(L"AUMID: IShellLink::SetDescription failed 0x%08lx", hr);
+            break;
+        }
+
+        IPropertyStore* store = nullptr;
+        hr = link->QueryInterface(IID_PPV_ARGS(&store));
+        if (FAILED(hr)) {
+            Wh_Log(L"AUMID: QI IPropertyStore failed 0x%08lx", hr);
+            break;
+        }
+        bool aumidProp = SetStringProp(store, PKEY_AppUserModel_ID, kAppUserModelId);
+        bool clsidProp = SetClsidProp(store, PKEY_AppUserModel_ToastActivatorCLSID,
+                                      CLSID_SnapSentryToastActivator);
+        hr = store->Commit();
+        store->Release();
+        if (!aumidProp || !clsidProp || FAILED(hr)) {
+            Wh_Log(L"AUMID: set props failed (aumid=%d clsid=%d commit=0x%08lx)",
+                   aumidProp, clsidProp, hr);
+            break;
+        }
+
+        IPersistFile* file = nullptr;
+        hr = link->QueryInterface(IID_PPV_ARGS(&file));
+        if (FAILED(hr)) {
+            Wh_Log(L"AUMID: QI IPersistFile failed 0x%08lx", hr);
+            break;
+        }
+        hr = file->Save(path.c_str(), TRUE);
+        file->Release();
+        if (FAILED(hr)) {
+            Wh_Log(L"AUMID: IPersistFile::Save failed 0x%08lx", hr);
+            break;
+        }
+        ok = true;
+    } while (false);
+
     link->Release();
     return ok;
 }
@@ -728,9 +777,8 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         return false;
     }
 
-    // Our own timer is authoritative for the automatic action, independent of
-    // the OS's on-screen banner duration -- the toast stays clickable from
-    // Action Center even after it visually collapses.
+    // Our own timer is authoritative for the automatic action. Remove the toast
+    // once the action is settled so stale buttons can't affect a later screenshot.
     DWORD timeoutMs =
         s.delaySeconds > 0 ? (DWORD)s.delaySeconds * 1000 : INFINITE;
     HANDLE waits[] = {g_stopEvent, g_toastActionEvent};
@@ -764,6 +812,30 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
 
     notifier->Hide(toast.Get());
     return true;
+}
+
+// Loads the notification stack once at startup so the first real screenshot
+// doesn't pay the cold-start cost while the user is waiting for the popup.
+static void PrewarmToast() {
+    using namespace ABI::Windows::UI::Notifications;
+    using namespace ABI::Windows::Foundation;
+    using Microsoft::WRL::ComPtr;
+    using Microsoft::WRL::Wrappers::HStringReference;
+
+    ComPtr<IToastNotificationManagerStatics> statics;
+    if (SUCCEEDED(RoGetActivationFactory(
+            HStringReference(
+                RuntimeClass_Windows_UI_Notifications_ToastNotificationManager)
+                .Get(),
+            IID_PPV_ARGS(&statics)))) {
+        ComPtr<IToastNotifier> notifier;
+        statics->CreateToastNotifierWithId(HStringReference(kAppUserModelId).Get(),
+                                           &notifier);
+    }
+    ComPtr<IInspectable> doc;
+    RoActivateInstance(
+        HStringReference(RuntimeClass_Windows_Data_Xml_Dom_XmlDocument).Get(),
+        &doc);
 }
 
 // ============================================================================
@@ -883,36 +955,60 @@ static void DeleteWatched(const std::wstring& path, const Settings& s) {
     }
 }
 
-// Waits until the file can be opened for reading (Snipping Tool has released it)
-// or the mod is shutting down. Returns false if the file vanished or we stopped.
+// Waits until the screenshot has finished being written, or the mod stops.
+// Rather than waiting for Snipping Tool (or an antivirus scan) to release the
+// file, it watches the size stop changing and confirms the file can be opened
+// with full sharing. This reacts in about 50-100ms instead of stalling for
+// seconds behind another process's handle. A half-written file simply fails to
+// decode later, so acting slightly early is safe.
 static bool WaitForStableFile(const std::wstring& path) {
-    for (int i = 0; i < 30; i++) {
-        HANDLE h = CreateFileW(path.c_str(), GENERIC_READ, FILE_SHARE_READ,
-                               nullptr, OPEN_EXISTING, 0, nullptr);
-        if (h != INVALID_HANDLE_VALUE) {
-            CloseHandle(h);
-            return true;
+    LONGLONG lastSize = -1;
+    for (int i = 0; i < 40; i++) {  // ~2s cap at 50ms steps.
+        WIN32_FILE_ATTRIBUTE_DATA info;
+        if (GetFileAttributesExW(path.c_str(), GetFileExInfoStandard, &info)) {
+            LONGLONG size =
+                ((LONGLONG)info.nFileSizeHigh << 32) | info.nFileSizeLow;
+            if (size > 0 && size == lastSize) {
+                HANDLE h = CreateFileW(
+                    path.c_str(), GENERIC_READ,
+                    FILE_SHARE_READ | FILE_SHARE_WRITE | FILE_SHARE_DELETE,
+                    nullptr, OPEN_EXISTING, 0, nullptr);
+                if (h != INVALID_HANDLE_VALUE) {
+                    CloseHandle(h);
+                    return true;
+                }
+            }
+            lastSize = size;
+        } else {
+            DWORD err = GetLastError();
+            if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
+                return false;  // Deleted before we got to it.
+            }
         }
-        DWORD err = GetLastError();
-        if (err == ERROR_FILE_NOT_FOUND || err == ERROR_PATH_NOT_FOUND) {
-            return false;  // Deleted before we got to it.
-        }
-        if (WaitStop(100)) {
+        if (WaitStop(50)) {
             return false;
         }
     }
-    // Still locked after ~3s; assume it exists and is being held open.
+    // Size never settled; proceed only if the file still exists.
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
 static void ProcessOne(const std::wstring& path) {
     Settings s = SnapshotSettings();
 
+    DWORD t0 = GetTickCount();
     if (!WaitForStableFile(path)) {
         return;
     }
+    if (s.logDetails) {
+        Wh_Log(L"stable in %lu ms: %s", GetTickCount() - t0, path.c_str());
+    }
 
+    DWORD t1 = GetTickCount();
     int action = s.popup ? ChooseAction(path, s) : ACTION_AUTO;
+    if (s.logDetails) {
+        Wh_Log(L"popup returned %d in %lu ms", action, GetTickCount() - t1);
+    }
     if (action == ACTION_KEEP) {
         return;
     }
@@ -990,7 +1086,10 @@ static DWORD WINAPI WorkerThread(LPVOID) {
         CLSID_SnapSentryToastActivator, &g_toastActivatorFactory,
         CLSCTX_LOCAL_SERVER, REGCLS_MULTIPLEUSE, &g_toastActivatorCookie);
     g_toastRegistered = aumidOk && clsidOk && SUCCEEDED(regHr);
-    if (!g_toastRegistered.load()) {
+    if (g_toastRegistered.load()) {
+        Wh_Log(L"Toast notifications ready");
+        PrewarmToast();  // Avoid a slow first popup.
+    } else {
         Wh_Log(
             L"Toast notification registration incomplete (aumid=%d clsid=%d "
             L"hr=0x%08lx); using the dialog instead",
@@ -1033,9 +1132,13 @@ static void Enqueue(const std::wstring& folder, const std::wstring& name) {
     if (added) {
         g_queue.push_back(folder + L"\\" + name);
     }
+    bool logDetails = g_settings.logDetails;
     LeaveCriticalSection(&g_lock);
     if (added) {
         SetEvent(g_workEvent);
+        if (logDetails) {
+            Wh_Log(L"detected %s", name.c_str());
+        }
     }
 }
 
@@ -1146,12 +1249,36 @@ BOOL WhTool_ModInit() {
     g_workEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);    // Auto reset.
     g_toastActionEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // Auto reset.
     if (!g_stopEvent || !g_reloadEvent || !g_workEvent || !g_toastActionEvent) {
+        if (g_stopEvent) CloseHandle(g_stopEvent);
+        if (g_reloadEvent) CloseHandle(g_reloadEvent);
+        if (g_workEvent) CloseHandle(g_workEvent);
+        if (g_toastActionEvent) CloseHandle(g_toastActionEvent);
+        g_stopEvent = g_reloadEvent = g_workEvent = g_toastActionEvent = nullptr;
+        DeleteCriticalSection(&g_lock);
+        DeleteCriticalSection(&g_toastLock);
         return FALSE;
     }
 
     g_workerThread = CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
     g_watchThread = CreateThread(nullptr, 0, WatchThread, nullptr, 0, nullptr);
-    return g_workerThread != nullptr && g_watchThread != nullptr;
+    if (!g_workerThread || !g_watchThread) {
+        SetEvent(g_stopEvent);
+        SetEvent(g_workEvent);
+        if (g_watchThread) WaitForSingleObject(g_watchThread, INFINITE);
+        if (g_workerThread) WaitForSingleObject(g_workerThread, INFINITE);
+        if (g_watchThread) CloseHandle(g_watchThread);
+        if (g_workerThread) CloseHandle(g_workerThread);
+        CloseHandle(g_stopEvent);
+        CloseHandle(g_reloadEvent);
+        CloseHandle(g_workEvent);
+        CloseHandle(g_toastActionEvent);
+        g_watchThread = g_workerThread = nullptr;
+        g_stopEvent = g_reloadEvent = g_workEvent = g_toastActionEvent = nullptr;
+        DeleteCriticalSection(&g_lock);
+        DeleteCriticalSection(&g_toastLock);
+        return FALSE;
+    }
+    return TRUE;
 }
 
 void WhTool_ModSettingsChanged() {
@@ -1170,7 +1297,9 @@ void WhTool_ModUninit() {
     SetEvent(g_workEvent);
 
     HANDLE threads[] = {g_watchThread, g_workerThread};
-    WaitForMultipleObjects(2, threads, TRUE, 5000);
+    // Both threads observe g_stopEvent and must be gone before their events and
+    // critical sections are destroyed.
+    WaitForMultipleObjects(2, threads, TRUE, INFINITE);
     if (g_watchThread) {
         CloseHandle(g_watchThread);
     }
@@ -1257,8 +1386,15 @@ BOOL Wh_ModInit() {
         }
 
         if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
-            ExitProcess(1);
+            // On a reload the launcher spawns this new process before the old
+            // one has finished exiting, so the single-instance lock is briefly
+            // still held. Wait for the old instance to release it (or abandon it
+            // by exiting) before giving up, instead of quitting on the race.
+            DWORD waited = WaitForSingleObject(g_toolModProcessMutex, 5000);
+            if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
+                Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
+                ExitProcess(1);
+            }
         }
 
         if (!WhTool_ModInit()) {
