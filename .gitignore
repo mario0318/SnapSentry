@@ -1,0 +1,13 @@
+# Local review and release-preparation notes
+PACKAGE-CONTENTS.md
+REVIEW-BRIEF.md
+REVIEW-FINDINGS.md
+SUBMISSION-CHECKLIST.md
+TEST-MATRIX.md
+
+# Editor and build output
+.vscode/
+*.dll
+*.o
+*.obj
+*.log
