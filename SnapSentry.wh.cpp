@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.7
+// @version         0.4.8
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -144,6 +144,7 @@ enum {
 
 static CRITICAL_SECTION g_toastLock;   // Guards g_toastAction.
 static int g_toastAction = ACTION_AUTO;
+static ULONGLONG g_activeToastId;
 static HANDLE g_toastActionEvent;      // Auto-reset: a toast was activated/dismissed.
 static std::atomic<bool> g_toastRegistered{false};  // AUMID+CLSID registration ok.
 
@@ -654,16 +655,26 @@ public:
     Activate(LPCWSTR, LPCWSTR invokedArgs, const NOTIFICATION_USER_INPUT_DATA*,
             ULONG) override {
         int action = ACTION_AUTO;
+        ULONGLONG toastId = 0;
         if (invokedArgs) {
-            if (wcscmp(invokedArgs, L"delete") == 0) {
+            const wchar_t* separator = wcschr(invokedArgs, L'|');
+            if (separator) toastId = _wcstoui64(separator + 1, nullptr, 10);
+            std::wstring command(invokedArgs,
+                                 separator ? separator - invokedArgs
+                                           : wcslen(invokedArgs));
+            if (command == L"delete") {
                 action = ACTION_DELETE;
-            } else if (wcscmp(invokedArgs, L"copydelete") == 0) {
+            } else if (command == L"copydelete") {
                 action = ACTION_COPY_DELETE;
-            } else if (wcscmp(invokedArgs, L"keep") == 0) {
+            } else if (command == L"keep") {
                 action = ACTION_KEEP;
             }
         }
         EnterCriticalSection(&g_toastLock);
+        if (!toastId || toastId != g_activeToastId) {
+            LeaveCriticalSection(&g_toastLock);
+            return S_OK;
+        }
         g_toastAction = action;
         LeaveCriticalSection(&g_toastLock);
         SetEvent(g_toastActionEvent);
@@ -734,6 +745,8 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
     }
 
     std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);
+    ULONGLONG toastId = GetTickCount64();
+    std::wstring id = std::to_wstring(toastId);
     std::wstring xml =
         L"<toast scenario=\"reminder\" duration=\"long\">"
         L"<visual><binding template=\"ToastGeneric\">"
@@ -741,10 +754,10 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         XmlEscape(name) +
         L"</text><text placement=\"attribution\">SnapSentry</text>"
         L"</binding></visual><actions>"
-        L"<action content=\"Delete now\" arguments=\"delete\" activationType=\"background\"/>"
-        L"<action content=\"Copy image &amp; delete\" arguments=\"copydelete\" activationType=\"background\"/>"
-        L"<action content=\"Keep\" arguments=\"keep\" activationType=\"background\"/>"
-        L"<action content=\"Use automatic action\" arguments=\"auto\" activationType=\"background\"/>"
+        L"<action content=\"Delete now\" arguments=\"delete|" + id + L"\" activationType=\"background\"/>"
+        L"<action content=\"Copy image &amp; delete\" arguments=\"copydelete|" + id + L"\" activationType=\"background\"/>"
+        L"<action content=\"Keep\" arguments=\"keep|" + id + L"\" activationType=\"background\"/>"
+        L"<action content=\"Use automatic action\" arguments=\"auto|" + id + L"\" activationType=\"background\"/>"
         L"</actions></toast>";
 
     ComPtr<IToastNotificationManagerStatics> toastStatics;
@@ -787,6 +800,9 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
     }
 
     ResetEvent(g_toastActionEvent);
+    EnterCriticalSection(&g_toastLock);
+    g_activeToastId = toastId;
+    LeaveCriticalSection(&g_toastLock);
     if (FAILED(notifier->Show(toast.Get()))) {
         return false;
     }
@@ -797,6 +813,7 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         s.delaySeconds > 0 ? (DWORD)s.delaySeconds * 1000 : INFINITE;
     HANDLE waits[] = {g_stopEvent, g_toastActionEvent};
     DWORD start = GetTickCount();
+    bool removeToast = false;
     for (;;) {
         DWORD elapsed = GetTickCount() - start;
         DWORD remaining = timeoutMs == INFINITE
@@ -811,12 +828,14 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         }
         if (result == WAIT_OBJECT_0) {  // Stop requested: never delete on shutdown.
             action = ACTION_KEEP;
+            removeToast = true;
             break;
         }
         if (result == WAIT_OBJECT_0 + 1) {
             EnterCriticalSection(&g_toastLock);
             action = g_toastAction;
             LeaveCriticalSection(&g_toastLock);
+            removeToast = true;
             break;
         }
         if (result == WAIT_OBJECT_0 + ARRAYSIZE(waits)) {
@@ -832,7 +851,10 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         break;
     }
 
-    notifier->Hide(toast.Get());
+    EnterCriticalSection(&g_toastLock);
+    g_activeToastId = 0;
+    LeaveCriticalSection(&g_toastLock);
+    if (removeToast) notifier->Hide(toast.Get());
     return true;
 }
 
