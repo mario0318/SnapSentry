@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.3
+// @version         0.4.4
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -605,16 +605,29 @@ static bool EnsureClsidRegistered() {
     std::wstring keyPath = std::wstring(L"Software\\Classes\\CLSID\\") + clsidStr +
                            L"\\LocalServer32";
 
-    HKEY key = nullptr;
-    if (RegCreateKeyExW(HKEY_CURRENT_USER, keyPath.c_str(), 0, nullptr, 0,
-                        KEY_SET_VALUE, nullptr, &key, nullptr) != ERROR_SUCCESS) {
-        return false;
+    // Windhawk currently hosts tool mods in an x86 process. Register both views
+    // so the 64-bit notification shell and a 32-bit caller resolve the same
+    // out-of-process activator.
+    bool ok = true;
+    const REGSAM views[] = {KEY_WOW64_64KEY, KEY_WOW64_32KEY};
+    for (REGSAM view : views) {
+        HKEY key = nullptr;
+        LSTATUS status = RegCreateKeyExW(
+            HKEY_CURRENT_USER, keyPath.c_str(), 0, nullptr, 0,
+            KEY_SET_VALUE | view, nullptr, &key, nullptr);
+        if (status == ERROR_SUCCESS) {
+            status = RegSetValueExW(
+                key, nullptr, 0, REG_SZ, (const BYTE*)command,
+                (DWORD)((wcslen(command) + 1) * sizeof(wchar_t)));
+            RegCloseKey(key);
+        }
+        if (status != ERROR_SUCCESS) {
+            Wh_Log(L"Toast CLSID registration failed (view=0x%lx error=%ld)",
+                   view, status);
+            ok = false;
+        }
     }
-    LSTATUS status =
-        RegSetValueExW(key, nullptr, 0, REG_SZ, (const BYTE*)command,
-                       (DWORD)((wcslen(command) + 1) * sizeof(wchar_t)));
-    RegCloseKey(key);
-    return status == ERROR_SUCCESS;
+    return ok;
 }
 
 // ============================================================================
