@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.4
+// @version         0.4.5
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -735,7 +735,7 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
 
     std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);
     std::wstring xml =
-        L"<toast><visual><binding template=\"ToastGeneric\">"
+        L"<toast duration=\"long\"><visual><binding template=\"ToastGeneric\">"
         L"<text>Screenshot saved</text><text>" +
         XmlEscape(name) +
         L"</text><text placement=\"attribution\">SnapSentry</text>"
