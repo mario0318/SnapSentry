@@ -19,33 +19,22 @@ notification.
 
 ## Clipboard modes
 
-* **Image** — decodes the picture with Windows Imaging Component (WIC) and places
-  a self-contained bitmap on the clipboard (`CF_DIBV5` + `CF_DIB`). This survives
-  deleting the source file, so it is the mode to use with automatic deletion.
-* **File** — places the file itself on the clipboard (`CF_HDROP`) for pasting into
-  File Explorer. Automatic deletion is suppressed because the payload only
-  references the file.
-* **Path** — places the full path on the clipboard as Unicode text. Automatic
-  deletion is suppressed for the same reason.
-* **None** — leaves the clipboard untouched (useful for a delete-only workflow).
+* **Image** copies the picture so it stays pasteable even after the file is deleted.
+* **File** copies the file for pasting into File Explorer. Deletion is disabled.
+* **Path** copies the full path as text. Deletion is disabled.
+* **None** leaves the clipboard unchanged.
 
-## Privacy notes
+## The notification
 
-Deleting a screenshot does not remove copies already stored in clipboard history,
-cloud sync, backups, or other programs. Files that were already in the folder when
-SnapSentry started are left alone.
+The popup is a real Windows notification, so it matches your light or dark theme.
+The first run registers SnapSentry with Windows so the notification buttons work.
+If notifications are unavailable, SnapSentry shows a standard dialog instead.
 
-## About the popup
+## Privacy
 
-The action popup is a real Windows toast notification (Action Center style),
-matching your light/dark theme automatically. Showing it requires a small,
-one-time registration: a Start Menu shortcut named `SnapSentry.lnk` (so Windows
-has an identity to attach notifications to) and a `HKCU` registry entry under
-`Software\Classes\CLSID` (so button clicks route back to SnapSentry). Both are
-created automatically the first time the mod runs and are safe to delete by hand
-if you uninstall the mod. If toast registration fails for any reason, SnapSentry
-automatically falls back to a native dialog box instead, so the mod keeps working
-either way.
+SnapSentry only handles files created after it starts. Deleting a screenshot does
+not remove copies already stored in clipboard history, cloud sync, backups, or
+other programs, and it is not secure erasure on an SSD.
 */
 // ==/WindhawkModReadme==
 
@@ -61,7 +50,7 @@ either way.
   $description: Only applies to Image and None clipboard modes. File and Path modes reference the file, so deletion is always suppressed for them.
 - showActionPopup: true
   $name: Show companion action popup
-  $description: A toast notification offering Delete now, Copy image and delete, or Keep (falls back to a dialog box if toast registration isn't available). The configured automatic action runs when the countdown expires.
+  $description: A notification offering Delete now, Copy image and delete, or Keep (falls back to a dialog if notifications are unavailable). The configured automatic action runs when the countdown expires.
 - clipboardMode: image
   $name: Clipboard content
   $options:
