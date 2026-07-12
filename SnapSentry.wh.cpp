@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.8
+// @version         0.4.9
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -754,10 +754,9 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         XmlEscape(name) +
         L"</text><text placement=\"attribution\">SnapSentry</text>"
         L"</binding></visual><actions>"
-        L"<action content=\"Delete now\" arguments=\"delete|" + id + L"\" activationType=\"background\"/>"
-        L"<action content=\"Copy image &amp; delete\" arguments=\"copydelete|" + id + L"\" activationType=\"background\"/>"
+        L"<action content=\"Delete\" arguments=\"delete|" + id + L"\" activationType=\"background\"/>"
+        L"<action content=\"Copy + delete\" arguments=\"copydelete|" + id + L"\" activationType=\"background\"/>"
         L"<action content=\"Keep\" arguments=\"keep|" + id + L"\" activationType=\"background\"/>"
-        L"<action content=\"Use automatic action\" arguments=\"auto|" + id + L"\" activationType=\"background\"/>"
         L"</actions></toast>";
 
     ComPtr<IToastNotificationManagerStatics> toastStatics;
