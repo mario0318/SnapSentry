@@ -6,8 +6,12 @@
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
+// @license         GPL-3.0
 // @compilerOptions -lole32 -lshell32 -lcomctl32 -lwindowscodecs -lruntimeobject -ladvapi32 -luuid
 // ==/WindhawkMod==
+
+// Source code is published under the GNU General Public License v3.0.
+// https://github.com/mario0318/SnapSentry
 
 // ==WindhawkModReadme==
 /*
