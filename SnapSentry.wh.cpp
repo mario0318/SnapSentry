@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.5
+// @version         0.4.6
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -801,25 +801,33 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action) 
         DWORD remaining = timeoutMs == INFINITE
                               ? INFINITE
                               : (elapsed >= timeoutMs ? 0 : timeoutMs - elapsed);
-        DWORD idx = 0;
-        HRESULT hr = CoWaitForMultipleHandles(
-            COWAIT_DISPATCH_CALLS | COWAIT_DISPATCH_WINDOW_MESSAGES, remaining,
-            ARRAYSIZE(waits), waits, &idx);
-        if (hr == RPC_S_CALLPENDING) {  // Timed out: apply the automatic action.
+        DWORD result = MsgWaitForMultipleObjectsEx(
+            ARRAYSIZE(waits), waits, remaining, QS_ALLINPUT,
+            MWMO_INPUTAVAILABLE | MWMO_ALERTABLE);
+        if (result == WAIT_TIMEOUT) {
             action = ACTION_AUTO;
             break;
         }
-        if (FAILED(hr)) {
-            action = ACTION_AUTO;  // Unexpected; fall back to the safe default.
-            break;
-        }
-        if (idx == 0) {  // Stop requested: never delete on shutdown.
+        if (result == WAIT_OBJECT_0) {  // Stop requested: never delete on shutdown.
             action = ACTION_KEEP;
             break;
         }
-        EnterCriticalSection(&g_toastLock);
-        action = g_toastAction;
-        LeaveCriticalSection(&g_toastLock);
+        if (result == WAIT_OBJECT_0 + 1) {
+            EnterCriticalSection(&g_toastLock);
+            action = g_toastAction;
+            LeaveCriticalSection(&g_toastLock);
+            break;
+        }
+        if (result == WAIT_OBJECT_0 + ARRAYSIZE(waits)) {
+            MSG msg;
+            while (PeekMessageW(&msg, nullptr, 0, 0, PM_REMOVE)) {
+                TranslateMessage(&msg);
+                DispatchMessageW(&msg);
+            }
+            continue;
+        }
+        Wh_Log(L"Toast wait failed %lu", GetLastError());
+        action = ACTION_KEEP;
         break;
     }
 
