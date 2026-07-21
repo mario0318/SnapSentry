@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.4.9
+// @version         0.5.0
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -112,6 +112,7 @@ DEFINE_GUID(IID_INotificationActivationCallback,
 #include <deque>
 #include <set>
 #include <string>
+#include <utility>
 
 // ============================================================================
 // Settings and shared state
@@ -127,10 +128,29 @@ struct Settings {
     bool logDetails;
 };
 
-static CRITICAL_SECTION g_lock;       // Guards g_settings, g_queue, g_inflight.
+static CRITICAL_SECTION g_lock;       // Guards g_settings, g_queue, g_inflight, g_recent, g_preexisting.
 static Settings g_settings;
 static std::deque<std::wstring> g_queue;   // Full paths waiting to be processed.
 static std::set<std::wstring> g_inflight;  // Names queued or in progress (dedup).
+
+// Names already present when the watched folder was opened. They are never acted
+// on, which is the literal safety invariant "never touch files that were already
+// in the folder." This is what stops a flood when OneDrive Files On-Demand
+// hydrates a folder full of old screenshots: each download surfaces as an ADDED
+// or RENAMED event for a name in this set, so it is ignored. Refreshed every time
+// the folder is (re)opened.
+static std::set<std::wstring> g_preexisting;
+
+// Names finished processing recently, each with an expiry tick. Swallows a
+// duplicate filesystem event for an already-handled screenshot that arrives
+// after the name left g_inflight. The common case is OneDrive Files On-Demand
+// rewriting the saved file into a placeholder, which fires a second ADDED or
+// RENAMED event for the same name seconds after the first notification closed;
+// an antivirus or a screenshot tool's temp-then-rename can do the same. A
+// screenshot name is unique per capture, so a same-name event inside the window
+// is always such a duplicate, never a distinct new shot.
+static std::deque<std::pair<std::wstring, ULONGLONG>> g_recent;
+static constexpr ULONGLONG kDuplicateEventWindowMs = 60000;  // Measured from when handling finished.
 
 static HANDLE g_stopEvent;   // Manual-reset: set once at shutdown.
 static HANDLE g_reloadEvent; // Auto-reset: settings changed, re-open the folder.
@@ -1116,10 +1136,27 @@ static bool DequeueOne(std::wstring& path) {
     return has;
 }
 
+// Caller must hold g_lock. Entries are appended in time order, so expired ones
+// are always at the front; drop them, then report whether the name is still
+// inside its dedup window.
+static bool SeenRecently(const std::wstring& name, ULONGLONG now) {
+    while (!g_recent.empty() && g_recent.front().second <= now) {
+        g_recent.pop_front();
+    }
+    for (const auto& entry : g_recent) {
+        if (entry.first == name) {
+            return true;
+        }
+    }
+    return false;
+}
+
 static void ReleaseInflight(const std::wstring& path) {
     std::wstring name = path.substr(path.find_last_of(L"\\/") + 1);
+    ULONGLONG now = GetTickCount64();
     EnterCriticalSection(&g_lock);
     g_inflight.erase(name);
+    g_recent.push_back({name, now + kDuplicateEventWindowMs});
     LeaveCriticalSection(&g_lock);
 }
 
@@ -1174,8 +1211,14 @@ static void Enqueue(const std::wstring& folder, const std::wstring& name) {
     if (!IsSafeChildName(name) || !IsSupportedImage(name)) {
         return;
     }
+    ULONGLONG now = GetTickCount64();
     EnterCriticalSection(&g_lock);
-    bool added = g_inflight.insert(name).second;  // Dedup rapid duplicate events.
+    // Skip names present when watching started (g_preexisting), then dedup rapid
+    // duplicate events (g_inflight) and the delayed follow-up event for a name we
+    // just finished handling (g_recent), such as OneDrive rewriting the file as a
+    // placeholder after the first notification closed.
+    bool added = !SeenRecently(name, now) && g_preexisting.count(name) == 0 &&
+                 g_inflight.insert(name).second;
     if (added) {
         g_queue.push_back(folder + L"\\" + name);
     }
@@ -1209,6 +1252,28 @@ static void ParseNotifications(const std::wstring& folder, const BYTE* buffer) {
     }
 }
 
+// Records the folder's current file names so hydration or sync churn on files
+// that predate this watch session is never treated as a new screenshot. Called
+// each time the directory is opened, before the first change notification is
+// armed. Placeholders are enumerated like any other entry, so dehydrated old
+// screenshots are captured too.
+static void SnapshotExistingNames(const std::wstring& folder) {
+    std::set<std::wstring> names;
+    WIN32_FIND_DATAW fd;
+    HANDLE h = FindFirstFileW((folder + L"\\*").c_str(), &fd);
+    if (h != INVALID_HANDLE_VALUE) {
+        do {
+            if (!(fd.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY)) {
+                names.insert(fd.cFileName);
+            }
+        } while (FindNextFileW(h, &fd));
+        FindClose(h);
+    }
+    EnterCriticalSection(&g_lock);
+    g_preexisting = std::move(names);
+    LeaveCriticalSection(&g_lock);
+}
+
 static DWORD WINAPI WatchThread(LPVOID) {
     OVERLAPPED ov{};
     ov.hEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);
@@ -1235,6 +1300,10 @@ static DWORD WINAPI WatchThread(LPVOID) {
             WaitForMultipleObjects(2, idle, FALSE, 2000);  // Folder may appear later.
             continue;
         }
+
+        // Snapshot existing names before arming notifications so downloads or
+        // sync churn on pre-existing files never look like new screenshots.
+        SnapshotExistingNames(s.folder);
 
         BYTE buffer[16384];
         bool reopen = false;
