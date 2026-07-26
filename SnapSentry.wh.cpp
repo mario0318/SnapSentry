@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Copy saved screenshots, delete them automatically, or choose what to do from a notification.
-// @version         0.5.0
+// @version         0.5.1
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -1445,10 +1445,33 @@ void WhTool_ModUninit() {
 
 bool g_isToolModProcessLauncher;
 HANDLE g_toolModProcessMutex;
+static HANDLE g_singleInstanceReady;       // Set once the mutex is held.
+static HANDLE g_singleInstanceLockThread;  // Owns the mutex for the process life.
 
 void WINAPI EntryPoint_Hook() {
     Wh_Log(L">");
     ExitThread(0);
+}
+
+// Owns the single-instance mutex on a thread that lives for the whole tool-mod
+// process, so ownership tracks the process rather than Windhawk's transient load
+// thread. CreateMutex's initial-owner ownership is bound to the calling thread;
+// owning it on the load thread (which exits after Wh_ModInit returns) abandoned
+// the mutex while the process kept running, so a reload's new process acquired it
+// via WAIT_ABANDONED and ran as a second live instance -> duplicate handling and
+// duplicate notifications. Holding it here keeps a running instance's mutex held
+// on a live thread, so a second instance's wait times out and it exits. On a real
+// reload the old process exits (Wh_ModUninit -> ExitProcess), releasing the mutex
+// so the new instance acquires within the timeout.
+static DWORD WINAPI SingleInstanceLockThread(LPVOID) {
+    DWORD waited = WaitForSingleObject(g_toolModProcessMutex, 5000);
+    if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
+        Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
+        ExitProcess(1);
+    }
+    SetEvent(g_singleInstanceReady);
+    Sleep(INFINITE);  // Hold the mutex until the process exits (OS then releases).
+    return 0;
 }
 
 BOOL Wh_ModInit() {
@@ -1494,24 +1517,33 @@ BOOL Wh_ModInit() {
     }
 
     if (isCurrentToolModProcess) {
+        // Create the single-instance mutex unowned, then take ownership on a
+        // dedicated lifetime thread (SingleInstanceLockThread) instead of on this
+        // transient load thread. That is what stops a second instance from running
+        // alongside a live one and producing duplicate notifications.
         g_toolModProcessMutex =
-            CreateMutex(nullptr, TRUE, L"windhawk-tool-mod_" WH_MOD_ID);
+            CreateMutex(nullptr, FALSE, L"windhawk-tool-mod_" WH_MOD_ID);
         if (!g_toolModProcessMutex) {
             Wh_Log(L"CreateMutex failed");
             ExitProcess(1);
         }
 
-        if (GetLastError() == ERROR_ALREADY_EXISTS) {
-            // On a reload the launcher spawns this new process before the old
-            // one has finished exiting, so the single-instance lock is briefly
-            // still held. Wait for the old instance to release it (or abandon it
-            // by exiting) before giving up, instead of quitting on the race.
-            DWORD waited = WaitForSingleObject(g_toolModProcessMutex, 5000);
-            if (waited != WAIT_OBJECT_0 && waited != WAIT_ABANDONED) {
-                Wh_Log(L"Tool mod already running (%s)", WH_MOD_ID);
-                ExitProcess(1);
-            }
+        g_singleInstanceReady = CreateEventW(nullptr, TRUE, FALSE, nullptr);
+        if (!g_singleInstanceReady) {
+            Wh_Log(L"CreateEvent failed");
+            ExitProcess(1);
         }
+
+        g_singleInstanceLockThread = CreateThread(
+            nullptr, 0, SingleInstanceLockThread, nullptr, 0, nullptr);
+        if (!g_singleInstanceLockThread) {
+            Wh_Log(L"CreateThread (single-instance) failed");
+            ExitProcess(1);
+        }
+
+        // The lock thread ExitProcess()es on contention; continue only once it
+        // signals that this process holds the single-instance mutex.
+        WaitForSingleObject(g_singleInstanceReady, INFINITE);
 
         if (!WhTool_ModInit()) {
             ExitProcess(1);
