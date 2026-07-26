@@ -21,6 +21,8 @@ Watches **Pictures\\Screenshots** and handles new screenshots as they are saved.
 Copy the image, delete the file after a delay, or choose what to do from a
 notification.
 
+![The SnapSentry notification](https://raw.githubusercontent.com/mario0318/SnapSentry/32558d49a40d02fb03661abad0c2d9d313ae00e9/assets/notification.png)
+
 ## Clipboard modes
 
 * **Image** copies the picture so it stays pasteable even after the file is deleted.
