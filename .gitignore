@@ -1,10 +1,5 @@
-# Local review and release-preparation notes
-ARCHITECTURE.md
-PACKAGE-CONTENTS.md
-REVIEW-BRIEF.md
-REVIEW-FINDINGS.md
-SUBMISSION-CHECKLIST.md
-TEST-MATRIX.md
+notes/
+CLAUDE.md
 
 # Editor and build output
 .vscode/
