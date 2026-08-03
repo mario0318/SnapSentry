@@ -36,9 +36,10 @@ Snipping Tool must be set to save screenshots automatically. The default folder
 is `Pictures\Screenshots`. If Snipping Tool saves to any other directory, set **Folder
 override** to that location.
 
-The first run registers SnapSentry with Windows so its notification buttons work.
-If notifications are unavailable, SnapSentry uses a standard dialog. Disabling the
-mod removes that registration again, so it leaves nothing behind.
+While the action popup is turned on, SnapSentry registers itself with Windows so
+its notification buttons work. If notifications are unavailable, SnapSentry uses a
+standard dialog. Turning the popup off, or disabling the mod, removes that
+registration again, so it leaves nothing behind.
 
 ## Privacy
 
