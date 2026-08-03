@@ -43,7 +43,10 @@ registration again, so it leaves nothing behind.
 
 ## Privacy
 
-SnapSentry only handles files created after it starts. It cannot remove copies
+SnapSentry only handles image files created in the watched folder while it is
+running, and only within a few seconds of their creation, so a picture copied in
+by hand or synced from another device is not treated as a new capture. Anything
+the folder override points at is watched on the same terms. It cannot remove copies
 already retained by clipboard history, cloud sync, backups, or other applications.
 Deleting a file is not secure erasure, especially on an SSD. When the Recycle Bin
 option is on, a deleted screenshot stays recoverable there until the bin is emptied.
