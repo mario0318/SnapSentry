@@ -11,9 +11,10 @@ you choose from a notification.
 - **Keep** leaves the screenshot alone.
 - If nothing is selected, the configured automatic action runs after the delay.
 
-Deletion can send the file to the Recycle Bin instead of removing it for good,
-so an accidental delete is recoverable. This is optional and can be turned off
-for a permanent delete.
+Deletion is off by default, since it is the irreversible part; turn on **Delete the
+saved screenshot** to opt in. When it is on, deletion sends the file to the Recycle
+Bin so an accidental delete is recoverable, unless you turn that off for a permanent
+delete.
 
 ## Clipboard modes
 
