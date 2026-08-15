@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Watch your Screenshots folder or any folder you pick, then copy, rename, or delete each new screenshot, or choose from a notification.
-// @version         0.17.0
+// @version         0.17.1
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -22,7 +22,7 @@ you point it at, and handles new screenshots as they are saved. Copy the image,
 rename the file, delete it after a delay, or choose what to do from a
 notification.
 
-![The SnapSentry notification](https://raw.githubusercontent.com/mario0318/SnapSentry/32558d49a40d02fb03661abad0c2d9d313ae00e9/assets/notification.png)
+![The SnapSentry notification](https://raw.githubusercontent.com/mario0318/SnapSentry/9f28c82bb5b901c399d6773ea8a2e09195bc3f1a/assets/notification-rename.png)
 
 ## Clipboard modes
 
