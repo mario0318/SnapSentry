@@ -62,7 +62,9 @@ may upload or retain the image before the local file is removed.
 ## Installation
 
 Paste `SnapSentry.wh.cpp` into Windhawk's **Create a new mod** editor and compile
-it. Supported formats are PNG, JPEG, BMP, GIF, and WebP.
+it. Supported formats are PNG, JPEG, JFIF, BMP, GIF, WebP, and TIFF. When copying the
+picture, a multi-frame image such as a multi-page TIFF or animated GIF is kept rather
+than deleted, since only its first frame can be put on the clipboard.
 
 ## License
 
