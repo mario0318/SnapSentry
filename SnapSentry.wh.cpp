@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Watch your Screenshots folder or any folder you pick, then copy, rename, or delete each new screenshot, or choose from a notification.
-// @version         0.17.2
+// @version         0.17.3
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -45,7 +45,10 @@ By default this is your Windows Screenshots folder, wherever Windows keeps it. I
 the settings you can type the full path to any folder instead, and shortcuts like
 %USERPROFILE% are filled in for you. Every new image that arrives in the folder you
 choose is treated the same way, so pick one where screenshots land rather than one
-that collects downloads.
+that collects downloads. The image types treated as new screenshots are .png, .jpg,
+.jpeg, .jfif, .bmp, .gif, .webp, .tif, and .tiff; with deletion on, only freshly
+created files of these types are ever removed, so it is worth knowing when you pick a
+folder.
 
 ## The notification
 
@@ -93,7 +96,7 @@ stored in clipboard history, cloud sync, backups, or other programs.
 # ---- Deleting the screenshot ----
 - deleteFile: false
   $name: Delete the screenshot after copying
-  $description: Off by default, since deleting is the part you cannot undo. Removes the file once the copy has succeeded. Only applies when copying the picture or nothing, because copying the file or its location has to leave it in place.
+  $description: Off by default, since deleting is the part you cannot undo. Removes the file once the copy has succeeded. Only applies when copying the picture or nothing, because copying the file or its location has to leave it in place. When copying the picture, a multi-page or animated image (multi-page TIFF, animated GIF or WebP) is kept rather than deleted, since only its first page or frame goes on the clipboard.
 - recycle: true
   $name: Delete to the Recycle Bin
   $description: When something is deleted, whether automatically or from the popup buttons, the file goes to the Recycle Bin so you can get it back. Turn this off to delete for good.
@@ -340,10 +343,20 @@ static bool IsSupportedImage(const std::wstring& name) {
     if (dot == std::wstring::npos) {
         return false;
     }
-    std::wstring ext = name.substr(dot);
-    CharLowerBuffW(ext.data(), (DWORD)ext.size());
-    return ext == L".png" || ext == L".jpg" || ext == L".jpeg" ||
-           ext == L".bmp" || ext == L".gif" || ext == L".webp";
+    // CompareStringOrdinal with bIgnoreCase is a true ordinal, case-insensitive
+    // match, so no CRT locale is involved: a locale like Turkish can't fold the
+    // 'i' in .tif/.tiff/.jfif/.gif to a dotless form that would match nothing.
+    static constexpr const wchar_t* kExtensions[] = {
+        L".png", L".jpg",  L".jpeg", L".jfif", L".bmp",
+        L".gif", L".webp", L".tif",  L".tiff",
+    };
+    const wchar_t* ext = name.c_str() + dot;
+    for (const wchar_t* candidate : kExtensions) {
+        if (CompareStringOrdinal(ext, -1, candidate, -1, TRUE) == CSTR_EQUAL) {
+            return true;
+        }
+    }
+    return false;
 }
 
 // A change-notification name must be a plain child file name. Reject anything
@@ -554,7 +567,8 @@ static void WriteBottomUp(BYTE* dest, const BYTE* topDown, UINT width,
 // what makes the copied image survive deletion of the source file. Windows
 // synthesizes CF_DIB and CF_BITMAP from CF_DIBV5 on demand, so publishing those too
 // would just be another full-size copy of the bitmap (it runs in a 32-bit process).
-static bool ClipboardImage(const std::wstring& path) {
+static bool ClipboardImage(const std::wstring& path, bool& multiFrame) {
+    multiFrame = false;  // Assigned for real once the frame count is known below.
     IWICImagingFactory* factory = nullptr;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
@@ -574,6 +588,13 @@ static bool ClipboardImage(const std::wstring& path) {
                 WICDecodeMetadataCacheOnDemand, &decoder))) {
             break;
         }
+        // A multi-page file (routinely a scanned TIFF) decodes only frame 0 onto
+        // the clipboard. Report that so the caller keeps the source file: pages
+        // 2..N aren't on the clipboard and would be lost if it were deleted. A
+        // count that can't be read (a third-party codec returning E_NOTIMPL) is
+        // treated as multi-frame, so frame 0 still copies but the file is kept.
+        UINT frames = 0;
+        multiFrame = FAILED(decoder->GetFrameCount(&frames)) || frames != 1;
         if (FAILED(decoder->GetFrame(0, &frame)) ||
             FAILED(factory->CreateFormatConverter(&converter)) ||
             FAILED(converter->Initialize(
@@ -1433,6 +1454,43 @@ static int ChooseAction(const std::wstring& path, const Settings& s) {
     return AskAction(path, s);
 }
 
+// Brief, self-dismissing notice shown on the worker's STA thread. Used when an
+// explicit Copy + delete keeps a multi-page or animated image instead of deleting
+// it, so that button never becomes a silent no-op. Reuses DialogCallback's backstop
+// (showCountdown off) so it auto-closes and never parks the queue, and it stays out
+// of the way during teardown.
+static void ShowKeptNotice(const std::wstring& name) {
+    if (WaitForSingleObject(g_stopEvent, 0) == WAIT_OBJECT_0) {
+        return;  // No UI during teardown.
+    }
+    DialogState state;
+    state.started = GetTickCount();
+    state.timeoutMs = 12000;  // Auto-close backstop; nothing waits on the answer.
+    state.showCountdown = false;
+    state.expiryAction = ACTION_KEEP;  // Matches the single button below.
+    state.expired = false;
+    state.baseText = name +
+                     L"\n\nThis is a multi-page or animated image, so only its first "
+                     L"page or frame could be copied. The file was kept instead of "
+                     L"deleted, so the other pages or frames aren't lost.";
+
+    TASKDIALOG_BUTTON buttons[] = {{ACTION_KEEP, L"OK"}};
+    TASKDIALOGCONFIG c{};
+    c.cbSize = sizeof(c);
+    c.dwFlags = TDF_SIZE_TO_CONTENT | TDF_CALLBACK_TIMER |
+                TDF_ALLOW_DIALOG_CANCELLATION;
+    c.pszWindowTitle = L"SnapSentry";
+    c.pszMainIcon = TD_INFORMATION_ICON;
+    c.pszMainInstruction = L"Kept the file";
+    c.pszContent = state.baseText.c_str();
+    c.cButtons = ARRAYSIZE(buttons);
+    c.pButtons = buttons;
+    c.nDefaultButton = ACTION_KEEP;
+    c.pfCallback = DialogCallback;
+    c.lpCallbackData = (LONG_PTR)&state;
+    TaskDialogIndirect(&c, nullptr, nullptr, nullptr);  // Result ignored: info only.
+}
+
 // ============================================================================
 // Processing
 // ============================================================================
@@ -1588,8 +1646,9 @@ static void ProcessOne(std::wstring path) {
     bool forceImage = (action == ACTION_COPY_DELETE);
 
     bool copied;
+    bool multiFrame = false;  // Set by ClipboardImage when only frame 0 was copied.
     if (forceImage || s.mode == L"image") {
-        copied = ClipboardImage(path);
+        copied = ClipboardImage(path, multiFrame);
     } else if (s.mode == L"file") {
         copied = ClipboardFile(path);
     } else if (s.mode == L"path") {
@@ -1608,8 +1667,24 @@ static void ProcessOne(std::wstring path) {
     // File and Path payloads reference the file, so deleting would break them.
     bool payloadReferencesFile =
         !forceImage && (s.mode == L"file" || s.mode == L"path");
-    bool wantsDelete = action != ACTION_COPY_ONLY &&
-                       (forceImage || (s.deleteFile && !payloadReferencesFile));
+    // forceImage (Copy + delete) short-circuits payloadReferencesFile, so the
+    // request-to-delete test has to carry it as its own term.
+    bool deleteRequested =
+        action != ACTION_COPY_ONLY &&
+        (forceImage || (s.deleteFile && !payloadReferencesFile));
+    // A multi-page image copied only its first frame, so deleting the file would
+    // lose pages 2..N. Keep it, the same treatment file/path payloads get.
+    if (deleteRequested && multiFrame) {
+        Wh_Log(L"Multi-page image: copied the first page only, keeping the file%s",
+               s.logDetails ? (L": " + path).c_str() : L"");
+        // With the popup in play (an explicit Copy + delete, or letting the
+        // countdown run) keeping the file would otherwise be a silent no-op, so
+        // say so. The unattended path (no popup) stays quiet, covered in the docs.
+        if (s.popup) {
+            ShowKeptNotice(path.substr(path.find_last_of(L"\\/") + 1));
+        }
+    }
+    bool wantsDelete = deleteRequested && !multiFrame;
     if (!wantsDelete) {
         return;
     }
