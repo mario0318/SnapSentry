@@ -2,6 +2,11 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
+## 0.18.0 - unreleased
+- When a multi-page or animated image is kept instead of deleted, a notice now says so; before, that only appeared in the log.
+- More reliable folder watching on network or sync-backed locations that don't deliver change notifications.
+- Copies large images using less memory.
+
 ## 0.17.3 - 2026-08-20
 - Recognizes `.tif`, `.tiff`, and `.jfif` images in a watched folder, alongside the PNG, JPEG, BMP, GIF, and WebP it already handled.
 
