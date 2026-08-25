@@ -2,7 +2,7 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Watch your Screenshots folder or any folder you pick, then copy, rename, or delete each new screenshot, or choose from a notification.
-// @version         0.18.0
+// @version         0.18.4
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
@@ -1554,6 +1554,13 @@ static bool ShowKeptToast(const std::wstring& name) {
 // PerformOperations returns S_OK for "carried out or aborted" alike, so success
 // on its own doesn't mean the file actually moved.
 static bool RecycleFile(const std::wstring& path) {
+    // The shell parser rejects a path that isn't canonical, and a watched folder
+    // ending in a separator composes one with a doubled separator, so hand it a
+    // normalized full path rather than the composed one.
+    wchar_t full[MAX_PATH];
+    DWORD n = GetFullPathNameW(path.c_str(), MAX_PATH, full, nullptr);
+    const wchar_t* target = (n > 0 && n < MAX_PATH) ? full : path.c_str();
+
     IFileOperation* op = nullptr;
     if (FAILED(CoCreateInstance(CLSID_FileOperation, nullptr, CLSCTX_ALL,
                                 IID_PPV_ARGS(&op)))) {
@@ -1563,7 +1570,7 @@ static bool RecycleFile(const std::wstring& path) {
     if (SUCCEEDED(op->SetOperationFlags(FOF_ALLOWUNDO | FOF_NO_UI |
                                         FOFX_RECYCLEONDELETE))) {
         IShellItem* item = nullptr;
-        if (SUCCEEDED(SHCreateItemFromParsingName(path.c_str(), nullptr,
+        if (SUCCEEDED(SHCreateItemFromParsingName(target, nullptr,
                                                   IID_PPV_ARGS(&item)))) {
             BOOL aborted = FALSE;
             if (SUCCEEDED(op->DeleteItem(item, nullptr)) &&
