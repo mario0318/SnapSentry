@@ -2,7 +2,7 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
-## 0.18.6 - 2026-08-24
+## 0.18.7 - 2026-08-24
 - When a multi-page or animated image is kept instead of deleted, a notice now says so; before, that only appeared in the log.
 - More reliable folder watching on network or sync-backed locations that don't deliver change notifications.
 - Copies large images using less memory.
