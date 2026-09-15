@@ -31,6 +31,23 @@ SnapSentry can rename each new screenshot using the title of the window that was
 in front when it was taken, so files read like `2026-08-01 17-16-52 Preview.png`
 instead of `Screenshot (12).png`. This is optional and off by default.
 
+## Development roadmap
+
+SnapSentry is staying a small, local screenshot tool. The next planned feature is
+exact duplicate detection for screenshots created during the current SnapSentry
+session. It will compare a new screenshot only with recent screenshots that
+SnapSentry itself has already handled. It will not scan the folder or touch files
+that were there before the mod started.
+
+After that, the likely direction is clearer naming, clipboard shortcuts, and
+better handling of short screenshot bursts. Folder-wide retention is deliberately
+not the next feature. If it is added later, it will need a separate opt-in design
+that only acts on files SnapSentry can prove it observed, never a blanket cleanup
+of an existing screenshot folder.
+
+If you want to work in one of these areas, please open an issue first so changes
+can stay compatible with the safety rules above.
+
 ## Setup
 
 Snipping Tool must be set to save screenshots automatically. The default folder
