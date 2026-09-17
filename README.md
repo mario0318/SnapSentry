@@ -31,19 +31,30 @@ SnapSentry can rename each new screenshot using the title of the window that was
 in front when it was taken, so files read like `2026-08-01 17-16-52 Preview.png`
 instead of `Screenshot (12).png`. This is optional and off by default.
 
+## Identical recent screenshots
+
+The optional **Remove identical recent screenshots** setting compares each new
+image with recent screenshots handled by this running SnapSentry instance. It
+uses an exact byte-for-byte comparison and recycles only the incoming duplicate
+after its copy succeeds. It does not scan the folder or touch files that were
+already present when watching began.
+
+## Audit trail
+
+SnapSentry writes one final-result audit line for each handled screenshot. It
+records whether the file was copied, kept, recycled, recycled as an exact
+duplicate, skipped, or permanently deleted. Failed cleanup is recorded as kept.
+Paths stay out of these lines unless verbose logging is enabled. Audit results
+are log-only, so popup-off keeps SnapSentry's no-footprint behavior.
+
 ## Development roadmap
 
-SnapSentry is staying a small, local screenshot tool. The next planned feature is
-exact duplicate detection for screenshots created during the current SnapSentry
-session. It will compare a new screenshot only with recent screenshots that
-SnapSentry itself has already handled. It will not scan the folder or touch files
-that were there before the mod started.
-
-After that, the likely direction is clearer naming, clipboard shortcuts, and
-better handling of short screenshot bursts. Folder-wide retention is deliberately
-not the next feature. If it is added later, it will need a separate opt-in design
-that only acts on files SnapSentry can prove it observed, never a blanket cleanup
-of an existing screenshot folder.
+SnapSentry is staying a small, local screenshot tool. Future work will focus on
+clearer naming, clipboard shortcuts, and better handling of short screenshot
+bursts. Folder-wide retention is deliberately not the next feature. If it is
+added later, it will need a separate opt-in design that only acts on files
+SnapSentry can prove it observed, never a blanket cleanup of an existing
+screenshot folder.
 
 If you want to work in one of these areas, please open an issue first so changes
 can stay compatible with the safety rules above.

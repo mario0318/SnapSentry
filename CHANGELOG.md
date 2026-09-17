@@ -2,6 +2,14 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
+## 0.19.7 - unreleased
+- Added an audit line for each automatic result: copied, kept, recycled, recycled-as-duplicate, skipped, or permanently deleted. Failed cleanup is reported as kept.
+- Audit results are log-only, preserving the popup-off no-footprint behavior.
+- A watched-folder path entered with leading or trailing spaces is now trimmed, so a pasted path with a stray space no longer silently stops the folder from being watched.
+
+## 0.19.6 - unreleased
+- Added opt-in, session-scoped exact duplicate detection. A repeated screenshot is compared byte-for-byte with recent screenshots handled by this run and the incoming duplicate is recycled only after its copy succeeds.
+
 ## 0.18.8 - 2026-08-24
 - When a multi-page or animated image is kept instead of deleted, a notice now says so; before, that only appeared in the log.
 - More reliable folder watching on network or sync-backed locations that don't deliver change notifications.

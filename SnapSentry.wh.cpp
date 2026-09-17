@@ -2,12 +2,12 @@
 // @id              snap-sentry
 // @name            SnapSentry
 // @description     Watch your Screenshots folder or any folder you pick, then copy, rename, or delete each new screenshot, or choose from a notification.
-// @version         0.19.5
+// @version         0.19.7
 // @author          mario0318
 // @github          https://github.com/mario0318
 // @include         windhawk.exe
 // @license         GPL-3.0
-// @compilerOptions -lole32 -lshell32 -lcomctl32 -lwindowscodecs -lruntimeobject -ladvapi32 -luuid
+// @compilerOptions -lole32 -lshell32 -lcomctl32 -lwindowscodecs -lruntimeobject -ladvapi32 -lbcrypt -luuid
 // ==/WindhawkMod==
 
 // Source code is published under the GNU General Public License v3.0.
@@ -40,6 +40,14 @@ notification.
 You can have SnapSentry rename each new screenshot from the window that was in
 front when it was taken, together with a timestamp, so a file ends up named for
 what it shows instead of Screenshot (1). The file stays in the same folder.
+
+## Identical recent screenshots
+
+When **Remove identical recent screenshots** is enabled, SnapSentry compares a
+new screenshot with screenshots it has already handled during this run. An
+exact byte-for-byte match is recycled only on the automatic path; the older
+copy is kept. The comparison is session-only and does not scan or touch files
+that were already in the folder when watching began.
 
 ## Which folder it watches
 
@@ -117,6 +125,9 @@ stored in clipboard history, cloud sync, backups, or other programs.
 - renameFromWindow: false
   $name: Rename screenshots after the active window
   $description: Names each screenshot after the window that was in front when you took it, plus a timestamp, so you can find it later without opening it. The file stays in the same folder.
+- removeExactDuplicates: false
+  $name: Remove identical recent screenshots
+  $description: Recycles an exact byte-for-byte repeat of a screenshot already handled during this run, only on the automatic action. It never scans or touches files from before this run, and the older copy is kept.
 
 # ---- Advanced ----
 - folder: ""
@@ -136,6 +147,7 @@ stored in clipboard history, cloud sync, backups, or other programs.
 #include <propkey.h>   // PKEY_AppUserModel_ID, PKEY_AppUserModel_ToastActivatorCLSID
 #include <commctrl.h>
 #include <wincodec.h>
+#include <bcrypt.h>
 #include <roapi.h>
 #include <winstring.h>
 #include <windows.data.xml.dom.h>
@@ -167,6 +179,7 @@ DEFINE_GUID(IID_INotificationActivationCallback,
 #include <wrl/wrappers/corewrappers.h>
 
 #include <atomic>
+#include <array>
 #include <cstdio>
 #include <cstdlib>
 #include <cstring>
@@ -175,6 +188,7 @@ DEFINE_GUID(IID_INotificationActivationCallback,
 #include <set>
 #include <string>
 #include <utility>
+#include <vector>
 
 // ============================================================================
 // Settings and shared state
@@ -189,6 +203,7 @@ struct Settings {
     std::wstring folder;
     bool recycle;
     bool renameFromWindow;
+    bool removeExactDuplicates;
     bool logDetails;
 };
 
@@ -218,6 +233,18 @@ static std::set<std::wstring> g_preexisting;
 // is always such a duplicate, never a distinct new shot.
 static std::deque<std::pair<std::wstring, ULONGLONG>> g_recent;
 static constexpr ULONGLONG kDuplicateEventWindowMs = 60000;  // Measured from when handling finished.
+
+struct RecentContent {
+    std::array<BYTE, 32> hash;
+    std::vector<BYTE> bytes;
+    ULONGLONG expires;
+};
+static std::deque<RecentContent> g_recentContent;
+static constexpr ULONGLONG kContentDuplicateWindowMs = 10 * 60 * 1000;
+static constexpr size_t kMaxRecentContent = 64;
+static constexpr size_t kMaxContentBytes = 8 * 1024 * 1024;
+static constexpr size_t kMaxContentCacheBytes = 32 * 1024 * 1024;
+static constexpr bool kDuplicateCleanupValidated = true;
 
 // Pre-seed the recent-name set so a file event we cause ourselves (the rename
 // below) is swallowed by the watcher instead of being handled as a brand-new
@@ -249,6 +276,19 @@ enum {
     ACTION_COPY_DELETE = 102,
     ACTION_KEEP = 103,
     ACTION_COPY_ONLY = 104,  // Couldn't ask the user: do the configured copy, never delete.
+};
+
+// Audit outcomes describe the final state, not an attempted operation. In
+// particular, a failed recycle is Kept, so the audit never claims a destructive
+// action that did not actually happen. Deleted is separate because the user can
+// explicitly disable Recycle Bin use.
+enum class AuditOutcome {
+    Copied,
+    Kept,
+    Recycled,
+    RecycledDuplicate,
+    Skipped,
+    Deleted,
 };
 
 static CRITICAL_SECTION g_toastLock;   // Guards g_toastAction, g_toastAnswered, g_activeToastId.
@@ -307,6 +347,7 @@ static void LoadSettings() {
     s.popup = Wh_GetIntSetting(L"showActionPopup") != 0;
     s.recycle = Wh_GetIntSetting(L"recycle") != 0;
     s.renameFromWindow = Wh_GetIntSetting(L"renameFromWindow") != 0;
+    s.removeExactDuplicates = Wh_GetIntSetting(L"removeExactDuplicates") != 0;
     // Kept as its own toggle so file paths can be withheld from a log the user
     // might share; Windhawk's own logging switch is all-or-nothing.
     s.logDetails = Wh_GetIntSetting(L"logDetails") != 0;
@@ -314,6 +355,12 @@ static void LoadSettings() {
     s.mode = WindhawkUtils::StringSetting::make(L"clipboardMode").get();
     s.pathFormat = WindhawkUtils::StringSetting::make(L"pathFormat").get();
     s.folder = WindhawkUtils::StringSetting::make(L"folder").get();
+    const auto firstNonWhitespace = s.folder.find_first_not_of(L" \t\r\n");
+    const auto lastNonWhitespace = s.folder.find_last_not_of(L" \t\r\n");
+    s.folder = firstNonWhitespace == std::wstring::npos
+                   ? std::wstring()
+                   : s.folder.substr(firstNonWhitespace,
+                                     lastNonWhitespace - firstNonWhitespace + 1);
     if (s.folder.empty()) {
         s.folder = DefaultScreenshotsFolder();
     } else {
@@ -354,6 +401,7 @@ static void LoadSettings() {
     }
 
     EnterCriticalSection(&g_lock);
+    g_recentContent.clear();
     g_settings = std::move(s);
     ++g_generation;
     SetEvent(g_settingsEvent);
@@ -599,7 +647,8 @@ enum class ImageCopy { Failed, Copied, CopiedFirstFrameOnly };
 // what makes the copied image survive deletion of the source file. Windows
 // synthesizes CF_DIB and CF_BITMAP from CF_DIBV5 on demand, so publishing those too
 // would just be another full-size copy of the bitmap (it runs in a 32-bit process).
-static ImageCopy ClipboardImage(const std::wstring& path) {
+static ImageCopy ClipboardImage(const std::wstring& path,
+                                HANDLE lockedFile = INVALID_HANDLE_VALUE) {
     IWICImagingFactory* factory = nullptr;
     if (FAILED(CoCreateInstance(CLSID_WICImagingFactory, nullptr,
                                 CLSCTX_INPROC_SERVER, IID_PPV_ARGS(&factory)))) {
@@ -615,9 +664,14 @@ static ImageCopy ClipboardImage(const std::wstring& path) {
     bool multiFrame = false;
 
     do {
-        if (FAILED(factory->CreateDecoderFromFilename(
-                path.c_str(), nullptr, GENERIC_READ,
-                WICDecodeMetadataCacheOnDemand, &decoder))) {
+        HRESULT decode = lockedFile != INVALID_HANDLE_VALUE
+            ? factory->CreateDecoderFromFileHandle(
+                  (ULONG_PTR)lockedFile, nullptr,
+                  WICDecodeMetadataCacheOnDemand, &decoder)
+            : factory->CreateDecoderFromFilename(
+                  path.c_str(), nullptr, GENERIC_READ,
+                  WICDecodeMetadataCacheOnDemand, &decoder);
+        if (FAILED(decode)) {
             break;
         }
         // A multi-page file (routinely a scanned TIFF) decodes only frame 0 onto
@@ -1691,6 +1745,32 @@ static void ShowKeptToast(const std::wstring& name) {
     notifier->Show(toast.Get());
 }
 
+static const wchar_t* AuditOutcomeName(AuditOutcome outcome) {
+    switch (outcome) {
+        case AuditOutcome::Copied: return L"copied";
+        case AuditOutcome::Kept: return L"kept";
+        case AuditOutcome::Recycled: return L"recycled";
+        case AuditOutcome::RecycledDuplicate: return L"recycled-as-duplicate";
+        case AuditOutcome::Skipped: return L"skipped";
+        case AuditOutcome::Deleted: return L"deleted";
+    }
+    return L"skipped";
+}
+
+// Reporting is deliberately a sink: it does not decide whether a copy or
+// cleanup is allowed, and it never changes the ordering of those operations.
+// Every outcome is log-only; popup-driven outcomes therefore do not produce a
+// second notification, and popup-off keeps the mod's no-footprint contract.
+static void AuditResult(const Settings& s, AuditOutcome outcome,
+                        const wchar_t* reason, const std::wstring& path) {
+    if (s.logDetails) {
+        Wh_Log(L"Audit: %s; %s; %s", AuditOutcomeName(outcome), reason,
+               path.c_str());
+    } else {
+        Wh_Log(L"Audit: %s; %s", AuditOutcomeName(outcome), reason);
+    }
+}
+
 // ============================================================================
 // Processing
 // ============================================================================
@@ -1740,27 +1820,32 @@ static bool RecycleFile(const std::wstring& path) {
 // act on something that redirects outside the folder. In Recycle Bin mode a file
 // that can't be recycled is kept rather than permanently deleted, so choosing
 // "recoverable" never silently turns into a permanent delete.
-static void DeleteWatched(const std::wstring& path, const Settings& s) {
+static AuditOutcome DeleteWatched(const std::wstring& path, const Settings& s) {
     DWORD attrs = GetFileAttributesW(path.c_str());
     if (attrs == INVALID_FILE_ATTRIBUTES) {
-        return;  // Already gone.
+        return AuditOutcome::Skipped;  // Already gone.
     }
     if (attrs & FILE_ATTRIBUTE_REPARSE_POINT) {
         Wh_Log(L"Refusing to delete reparse point%s",
                s.logDetails ? (L": " + path).c_str() : L"");
-        return;
+        return AuditOutcome::Kept;
     }
     if (s.recycle) {
-        if (!RecycleFile(path)) {
+        if (RecycleFile(path)) {
+            return AuditOutcome::Recycled;
+        } else {
             Wh_Log(L"Recycle failed, keeping file%s",
                    s.logDetails ? (L": " + path).c_str() : L"");
         }
-        return;
+        return AuditOutcome::Kept;
     }
-    if (!DeleteFileW(path.c_str())) {
+    if (DeleteFileW(path.c_str())) {
+        return AuditOutcome::Deleted;
+    } else {
         Wh_Log(L"Delete failed (%lu)%s", GetLastError(),
                s.logDetails ? (L": " + path).c_str() : L"");
     }
+    return AuditOutcome::Kept;
 }
 
 // Waits until the screenshot has finished being written, or the mod stops.
@@ -1801,12 +1886,191 @@ static bool WaitForStableFile(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
+static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest,
+                     std::vector<BYTE>& contents) {
+    contents.clear();
+    BCRYPT_ALG_HANDLE algorithm = nullptr;
+    BCRYPT_HASH_HANDLE hash = nullptr;
+    std::vector<BYTE> object;
+    bool ok = false;
+    do {
+        if (BCryptOpenAlgorithmProvider(&algorithm, BCRYPT_SHA256_ALGORITHM,
+                                        nullptr, 0) != 0) break;
+        DWORD objectBytes = 0;
+        ULONG written = 0;
+        if (BCryptGetProperty(algorithm, BCRYPT_OBJECT_LENGTH,
+                              (PUCHAR)&objectBytes, sizeof(objectBytes),
+                              &written, 0) != 0 ||
+            written != sizeof(objectBytes) || objectBytes == 0) break;
+        object.resize(objectBytes);
+        if (BCryptCreateHash(algorithm, &hash, object.data(), objectBytes,
+                             nullptr, 0, 0) != 0) break;
+        LARGE_INTEGER start{};
+        if (file == INVALID_HANDLE_VALUE ||
+            !SetFilePointerEx(file, start, nullptr, FILE_BEGIN)) break;
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (!GetFileInformationByHandle(file, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT |
+                                      FILE_ATTRIBUTE_DIRECTORY)) ||
+            info.nFileSizeHigh != 0 || info.nFileSizeLow == 0 ||
+            info.nFileSizeLow > kMaxContentBytes) break;
+        std::array<BYTE, 64 * 1024> buffer;
+        for (;;) {
+            if (WaitStop(0)) break;
+            DWORD read = 0;
+            if (!ReadFile(file, buffer.data(), (DWORD)buffer.size(), &read,
+                          nullptr)) break;
+            if (read == 0) {
+                ok = BCryptFinishHash(hash, digest.data(), (ULONG)digest.size(),
+                                      0) == 0;
+                break;
+            }
+            if (contents.size() + read > kMaxContentBytes ||
+                BCryptHashData(hash, buffer.data(), read, 0) != 0) break;
+            contents.insert(contents.end(), buffer.begin(), buffer.begin() + read);
+        }
+    } while (false);
+    if (hash) BCryptDestroyHash(hash);
+    if (algorithm) BCryptCloseAlgorithmProvider(algorithm, 0);
+    return ok;
+}
+
+static bool SeenRecentContentAndRemember(const std::array<BYTE, 32>& hash,
+                                         std::vector<BYTE> contents,
+                                         ULONGLONG now) {
+    while (!g_recentContent.empty() && g_recentContent.front().expires <= now)
+        g_recentContent.pop_front();
+    bool duplicate = false;
+    for (const auto& entry : g_recentContent) {
+        if (entry.hash == hash && entry.bytes == contents) {
+            duplicate = true;
+            break;
+        }
+    }
+    g_recentContent.push_back({hash, std::move(contents),
+                               now + kContentDuplicateWindowMs});
+    size_t bytes = 0;
+    for (const auto& entry : g_recentContent) bytes += entry.bytes.size();
+    while (g_recentContent.size() > kMaxRecentContent ||
+           bytes > kMaxContentCacheBytes) {
+        bytes -= g_recentContent.front().bytes.size();
+        g_recentContent.pop_front();
+    }
+    return duplicate;
+}
+
+class LockedCapture {
+public:
+    HANDLE file = INVALID_HANDLE_VALUE;
+    HANDLE folder = INVALID_HANDLE_VALUE;
+    LockedCapture() = default;
+    LockedCapture(const LockedCapture&) = delete;
+    LockedCapture& operator=(const LockedCapture&) = delete;
+    ~LockedCapture() {
+        CloseFile();
+        if (folder != INVALID_HANDLE_VALUE) CloseHandle(folder);
+    }
+    void CloseFile() {
+        if (file != INVALID_HANDLE_VALUE) CloseHandle(file);
+        file = INVALID_HANDLE_VALUE;
+    }
+    bool Open(const std::wstring& path, const std::wstring& parent) {
+        auto split = path.find_last_of(L"\\/");
+        if (split == std::wstring::npos ||
+            _wcsicmp(path.substr(0, split).c_str(), parent.c_str()) != 0 ||
+            path.find(L':', split) != std::wstring::npos) return false;
+        folder = CreateFileW(parent.c_str(), FILE_READ_ATTRIBUTES,
+                             FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
+                             OPEN_EXISTING, FILE_FLAG_BACKUP_SEMANTICS |
+                             FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
+        BY_HANDLE_FILE_INFORMATION info{};
+        if (folder == INVALID_HANDLE_VALUE ||
+            !GetFileInformationByHandle(folder, &info) ||
+            !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
+            (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
+        file = CreateFileW(path.c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ,
+                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
+                           nullptr);
+        if (file == INVALID_HANDLE_VALUE ||
+            !GetFileInformationByHandle(file, &info) ||
+            (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
+                                      FILE_ATTRIBUTE_REPARSE_POINT)) ||
+            info.nNumberOfLinks != 1) {
+            CloseFile();
+            return false;
+        }
+        return true;
+    }
+};
+
+static bool RenameLockedCapture(HANDLE file, const std::wstring& destination) {
+    size_t nameBytes = destination.size() * sizeof(wchar_t);
+    size_t bytes = sizeof(FILE_RENAME_INFO) + nameBytes;
+    if (bytes > MAXDWORD) return false;
+    std::vector<BYTE> storage(bytes, 0);
+    auto info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
+    info->ReplaceIfExists = FALSE;
+    info->FileNameLength = (DWORD)nameBytes;
+    memcpy(info->FileName, destination.data(), nameBytes);
+    return SetFileInformationByHandle(file, FileRenameInfo, info,
+                                      (DWORD)bytes) != FALSE;
+}
+
+class RecoverySlot {
+public:
+    std::wstring folder;
+    std::wstring file;
+    ~RecoverySlot() { if (!folder.empty()) RemoveDirectoryW(folder.c_str()); }
+    bool Create(const std::wstring& parent, const std::wstring& original) {
+        GUID guid{};
+        wchar_t token[40];
+        if (FAILED(CoCreateGuid(&guid)) ||
+            !StringFromGUID2(guid, token, ARRAYSIZE(token))) return false;
+        std::wstring candidate = parent + L"\\SnapSentry Recovery " + token;
+        if (!CreateDirectoryW(candidate.c_str(), nullptr)) return false;
+        folder = std::move(candidate);
+        file = folder + L"\\" +
+               original.substr(original.find_last_of(L"\\/") + 1);
+        return true;
+    }
+};
+
+static AuditOutcome RecycleDuplicate(const std::wstring& path, const Settings& s,
+                                     ULONGLONG generation,
+                                     LockedCapture& capture) {
+    if (WaitStop(0)) return AuditOutcome::Kept;
+    RecoverySlot recovery;
+    if (capture.file == INVALID_HANDLE_VALUE ||
+        !recovery.Create(s.folder, path)) return AuditOutcome::Kept;
+    const std::wstring& staged = recovery.file;
+    if (g_generation.load() != generation || WaitStop(0) ||
+        !RenameLockedCapture(capture.file, staged)) return AuditOutcome::Kept;
+    if (WaitStop(0) || g_generation.load() != generation) {
+        if (!RenameLockedCapture(capture.file, path))
+            Wh_Log(L"Cleanup cancelled; screenshot kept in its recovery folder");
+        return AuditOutcome::Kept;
+    }
+    capture.CloseFile();
+    if (RecycleFile(staged)) {
+        return AuditOutcome::RecycledDuplicate;
+    } else {
+        if (!MoveFileExW(staged.c_str(), path.c_str(), 0))
+            Wh_Log(L"Duplicate recycle failed; screenshot kept in its recovery folder");
+        else
+            Wh_Log(L"Duplicate recycle failed, keeping file%s",
+                   s.logDetails ? (L": " + path).c_str() : L"");
+    }
+    return AuditOutcome::Kept;
+}
+
 static void ProcessOne(std::wstring path) {
     Settings s = SnapshotSettings();
     ULONGLONG generation = g_generation.load();
 
     DWORD t0 = GetTickCount();
     if (!WaitForStableFile(path)) {
+        AuditResult(s, AuditOutcome::Skipped,
+                    L"file was unavailable or processing stopped", path);
         return;
     }
     if (s.logDetails) {
@@ -1835,21 +2099,29 @@ static void ProcessOne(std::wstring path) {
     // copy below (it just never deletes), so it passes through here.
     if (action != ACTION_AUTO && action != ACTION_DELETE &&
         action != ACTION_COPY_DELETE && action != ACTION_COPY_ONLY) {
+        AuditResult(s, AuditOutcome::Skipped, L"no action selected", path);
         return;
     }
     if (action == ACTION_DELETE) {
-        DeleteWatched(path, s);
+        AuditResult(s, DeleteWatched(path, s), L"requested deletion", path);
         return;
     }
 
     // ACTION_COPY_DELETE forces the durable image path + deletion regardless of
     // the configured clipboard mode. ACTION_AUTO / timeout uses the settings.
     bool forceImage = (action == ACTION_COPY_DELETE);
+    LockedCapture capture;
+    bool duplicateCandidate = kDuplicateCleanupValidated &&
+        s.removeExactDuplicates &&
+        (forceImage || s.mode == L"image");
+    bool cleanupBlocked = duplicateCandidate && !capture.Open(path, s.folder);
+    // Lack of delete access must not prevent an otherwise valid clipboard copy.
+    // If locking failed, use the existing copy path but never clean up that file.
 
     bool copied;
     bool multiFrame = false;  // True when only frame 0 of a multi-frame image copied.
     if (forceImage || s.mode == L"image") {
-        ImageCopy r = ClipboardImage(path);
+        ImageCopy r = ClipboardImage(path, capture.file);
         copied = (r != ImageCopy::Failed);
         multiFrame = (r == ImageCopy::CopiedFirstFrameOnly);
     } else if (s.mode == L"file") {
@@ -1863,8 +2135,50 @@ static void ProcessOne(std::wstring path) {
     if (!copied) {
         Wh_Log(L"Clipboard copy failed%s",
                s.logDetails ? (L": " + path).c_str() : L"");
+        AuditResult(s, AuditOutcome::Skipped, L"clipboard copy failed", path);
         return;  // Invariant: never delete when a requested copy failed.
     }
+    if (cleanupBlocked) {
+        AuditResult(s, AuditOutcome::Kept,
+                    L"duplicate check could not lock the file", path);
+        return;
+    }
+
+    bool fullImageCopied = (forceImage || s.mode == L"image") && !multiFrame;
+    if (fullImageCopied && duplicateCandidate && !WaitStop(0)) {
+        std::array<BYTE, 32> digest;
+        std::vector<BYTE> contents;
+        if (HashFile(capture.file, digest, contents)) {
+            EnterCriticalSection(&g_lock);
+            bool current = generation == g_generation.load();
+            bool duplicate = current && SeenRecentContentAndRemember(
+                digest, std::move(contents), GetTickCount64());
+            LeaveCriticalSection(&g_lock);
+            if (!current) {
+                AuditResult(s, AuditOutcome::Skipped,
+                            L"settings changed during processing", path);
+                return;
+            }
+            if (duplicate && action == ACTION_AUTO) {
+                DWORD delay = s.popup ? 0 : (DWORD)s.delaySeconds * 1000;
+                if (WaitStop(delay) || g_generation.load() != generation) {
+                    AuditResult(s, AuditOutcome::Kept,
+                                L"duplicate cleanup cancelled or stopped", path);
+                    return;
+                }
+                AuditOutcome outcome =
+                    RecycleDuplicate(path, s, generation, capture);
+                AuditResult(s, outcome, outcome == AuditOutcome::RecycledDuplicate
+                                ? L"exact duplicate" : L"duplicate cleanup did not recycle",
+                            path);
+                return;
+            }
+        } else {
+            Wh_Log(L"Could not check screenshot for a recent duplicate%s",
+                   s.logDetails ? (L": " + path).c_str() : L"");
+        }
+    }
+    capture.CloseFile();
     // Deletion only makes sense for self-contained payloads (image / none).
     // File and Path payloads reference the file, so deleting would break them.
     bool payloadReferencesFile =
@@ -1886,17 +2200,26 @@ static void ProcessOne(std::wstring path) {
         if (s.popup) {
             ShowKeptToast(BaseName(path));
         }
+        AuditResult(s, AuditOutcome::Kept,
+                    L"multi-frame image was only partly copied", path);
     }
     bool wantsDelete = deleteRequested && !multiFrame;
     if (!wantsDelete) {
+        if (!multiFrame) {
+            AuditResult(s, AuditOutcome::Copied,
+                        L"copy completed and file was kept", path);
+        }
         return;
     }
 
     // With the popup, the countdown already elapsed, so delete immediately.
     DWORD delay = (s.popup || forceImage) ? 0 : (DWORD)s.delaySeconds * 1000;
-    if (!WaitStop(delay)) {
-        DeleteWatched(path, s);
+    if (WaitStop(delay)) {
+        AuditResult(s, AuditOutcome::Kept,
+                    L"cleanup cancelled or stopped", path);
+        return;
     }
+    AuditResult(s, DeleteWatched(path, s), L"automatic cleanup", path);
 }
 
 // ============================================================================
@@ -2233,6 +2556,7 @@ static void SnapshotExistingNames(const std::wstring& folder) {
         FindClose(h);
     }
     EnterCriticalSection(&g_lock);
+    g_recentContent.clear();
     g_preexisting = std::move(names);
     LeaveCriticalSection(&g_lock);
 }
