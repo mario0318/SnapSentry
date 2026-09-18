@@ -34,10 +34,13 @@ instead of `Screenshot (12).png`. This is optional and off by default.
 ## Identical recent screenshots
 
 The optional **Remove identical recent screenshots** setting compares each new
-image with recent screenshots handled by this running SnapSentry instance. It
-uses an exact byte-for-byte comparison and recycles only the incoming duplicate
-after its copy succeeds. It does not scan the folder or touch files that were
-already present when watching began.
+image with images handled recently by this running SnapSentry instance, within a
+short window of about ten minutes. It works only with the **Image** clipboard
+mode, because that mode makes a durable copy before cleanup. It uses an exact
+byte-for-byte comparison and recycles only the incoming duplicate after its copy
+succeeds. The comparison resets when settings change or folder watching
+restarts. It does not scan the folder or touch files that were already present
+when watching began.
 
 ## Audit trail
 
@@ -79,7 +82,7 @@ last few seconds as a new screenshot. Files that were already there, and copies 
 older images dragged in by hand or synced from another device, are left alone. A
 brand new file saved or downloaded straight into the folder cannot be told apart
 from a capture, so avoid pointing the folder override at a place where downloads
-land. It cannot remove copies
+land. Duplicate detection keeps only short-lived hashes, not image data. It cannot remove copies
 already retained by clipboard history, cloud sync, backups, or other applications.
 Deleting a file is not secure erasure, especially on an SSD. When the Recycle Bin
 option is on, a deleted screenshot stays recoverable there until the bin is emptied.

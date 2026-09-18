@@ -44,10 +44,12 @@ what it shows instead of Screenshot (1). The file stays in the same folder.
 ## Identical recent screenshots
 
 When **Remove identical recent screenshots** is enabled, SnapSentry compares a
-new screenshot with screenshots it has already handled during this run. An
-exact byte-for-byte match is recycled only on the automatic path; the older
-copy is kept. The comparison is session-only and does not scan or touch files
-that were already in the folder when watching began.
+new image with images handled recently by this running instance, within a short
+window of about ten minutes. It works only with the **Image** clipboard mode,
+because that is the mode that makes a durable copy before cleanup. An exact
+byte-for-byte match is recycled only on the automatic path; the older copy is
+kept. The comparison is session-only and does not scan or touch files that were
+already in the folder when watching began.
 
 ## Which folder it watches
 
@@ -82,7 +84,8 @@ file saved or downloaded straight into the folder cannot be told apart from a
 capture, so avoid pointing the folder at a place where downloads land. By default a
 deleted screenshot goes to the Recycle Bin so it can be restored; if you turn that
 off, deletion is permanent. Deleting a screenshot does not remove copies already
-stored in clipboard history, cloud sync, backups, or other programs.
+stored in clipboard history, cloud sync, backups, or other programs. Duplicate
+detection keeps only short-lived hashes, not image data.
 */
 // ==/WindhawkModReadme==
 
@@ -114,7 +117,7 @@ stored in clipboard history, cloud sync, backups, or other programs.
   $description: When something is deleted, whether automatically or from the popup buttons, the file goes to the Recycle Bin so you can get it back. Turn this off to delete for good.
 - removeExactDuplicates: false
   $name: Remove identical recent screenshots
-  $description: Recycles an exact byte-for-byte repeat of a screenshot already handled during this run, only on the automatic action. It never scans or touches files from before this run, and the older copy is kept.
+  $description: In Image clipboard mode, recycles an exact byte-for-byte repeat seen in the recent ten-minute window, only on the automatic action. The comparison resets when settings change or folder watching restarts. It never scans or touches older files, and the older copy is kept.
 
 # ---- The popup ----
 - showActionPopup: false
@@ -235,14 +238,11 @@ static constexpr ULONGLONG kDuplicateEventWindowMs = 60000;  // Measured from wh
 
 struct RecentContent {
     std::array<BYTE, 32> hash;
-    std::vector<BYTE> bytes;
     ULONGLONG expires;
 };
 static std::deque<RecentContent> g_recentContent;
 static constexpr ULONGLONG kContentDuplicateWindowMs = 10 * 60 * 1000;
 static constexpr size_t kMaxRecentContent = 64;
-static constexpr size_t kMaxContentBytes = 8 * 1024 * 1024;
-static constexpr size_t kMaxContentCacheBytes = 32 * 1024 * 1024;
 
 // Pre-seed the recent-name set so a file event we cause ourselves (the rename
 // below) is swallowed by the watcher instead of being handled as a brand-new
@@ -359,6 +359,9 @@ static void LoadSettings() {
                    ? std::wstring()
                    : s.folder.substr(firstNonWhitespace,
                                      lastNonWhitespace - firstNonWhitespace + 1);
+    if (s.removeExactDuplicates && s.mode != L"image") {
+        Wh_Log(L"Exact duplicate removal requires Image clipboard mode; disabled for the current mode");
+    }
     if (s.folder.empty()) {
         s.folder = DefaultScreenshotsFolder();
     } else {
@@ -1884,9 +1887,7 @@ static bool WaitForStableFile(const std::wstring& path) {
     return GetFileAttributesW(path.c_str()) != INVALID_FILE_ATTRIBUTES;
 }
 
-static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest,
-                     std::vector<BYTE>& contents) {
-    contents.clear();
+static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest) {
     BCRYPT_ALG_HANDLE algorithm = nullptr;
     BCRYPT_HASH_HANDLE hash = nullptr;
     std::vector<BYTE> object;
@@ -1910,8 +1911,7 @@ static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest,
         if (!GetFileInformationByHandle(file, &info) ||
             (info.dwFileAttributes & (FILE_ATTRIBUTE_REPARSE_POINT |
                                       FILE_ATTRIBUTE_DIRECTORY)) ||
-            info.nFileSizeHigh != 0 || info.nFileSizeLow == 0 ||
-            info.nFileSizeLow > kMaxContentBytes) break;
+            (info.nFileSizeHigh == 0 && info.nFileSizeLow == 0)) break;
         std::array<BYTE, 64 * 1024> buffer;
         for (;;) {
             if (WaitStop(0)) break;
@@ -1923,9 +1923,7 @@ static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest,
                                       0) == 0;
                 break;
             }
-            if (contents.size() + read > kMaxContentBytes ||
-                BCryptHashData(hash, buffer.data(), read, 0) != 0) break;
-            contents.insert(contents.end(), buffer.begin(), buffer.begin() + read);
+            if (BCryptHashData(hash, buffer.data(), read, 0) != 0) break;
         }
     } while (false);
     if (hash) BCryptDestroyHash(hash);
@@ -1934,26 +1932,19 @@ static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest,
 }
 
 static bool SeenRecentContentAndRemember(const std::array<BYTE, 32>& hash,
-                                         std::vector<BYTE> contents,
                                          ULONGLONG now) {
     while (!g_recentContent.empty() && g_recentContent.front().expires <= now)
         g_recentContent.pop_front();
     bool duplicate = false;
     for (const auto& entry : g_recentContent) {
-        if (entry.hash == hash && entry.bytes == contents) {
+        if (entry.hash == hash) {
             duplicate = true;
             break;
         }
     }
-    g_recentContent.push_back({hash, std::move(contents),
-                               now + kContentDuplicateWindowMs});
-    size_t bytes = 0;
-    for (const auto& entry : g_recentContent) bytes += entry.bytes.size();
-    while (g_recentContent.size() > kMaxRecentContent ||
-           bytes > kMaxContentCacheBytes) {
-        bytes -= g_recentContent.front().bytes.size();
+    g_recentContent.push_back({hash, now + kContentDuplicateWindowMs});
+    while (g_recentContent.size() > kMaxRecentContent)
         g_recentContent.pop_front();
-    }
     return duplicate;
 }
 
@@ -2093,27 +2084,45 @@ static void ProcessOne(std::wstring path) {
     bool fullImageCopied = (forceImage || s.mode == L"image") && !multiFrame;
     if (fullImageCopied && duplicateCandidate && !WaitStop(0)) {
         std::array<BYTE, 32> digest;
-        std::vector<BYTE> contents;
-        if (HashFile(capture.file, digest, contents)) {
+        if (HashFile(capture.file, digest)) {
             EnterCriticalSection(&g_lock);
             bool current = generation == g_generation.load();
             bool duplicate = current && SeenRecentContentAndRemember(
-                digest, std::move(contents), GetTickCount64());
+                digest, GetTickCount64());
             LeaveCriticalSection(&g_lock);
             if (!current) {
-                AuditResult(s, AuditOutcome::Skipped,
-                            L"settings changed during processing", path);
+                AuditResult(s, AuditOutcome::Copied,
+                            L"copy completed before settings changed", path);
                 return;
             }
             if (duplicate && action == ACTION_AUTO) {
                 DWORD delay = s.popup ? 0 : (DWORD)s.delaySeconds * 1000;
+                BY_HANDLE_FILE_INFORMATION beforeCleanup{};
+                if (!GetFileInformationByHandle(capture.file, &beforeCleanup)) {
+                    AuditResult(s, AuditOutcome::Kept,
+                                L"file changed before cleanup", path);
+                    return;
+                }
+                capture.CloseFile();
                 if (WaitStop(delay) || g_generation.load() != generation) {
                     AuditResult(s, AuditOutcome::Kept,
                                 L"duplicate cleanup cancelled or stopped", path);
                     return;
                 }
+                LockedCapture again;
+                BY_HANDLE_FILE_INFORMATION afterCleanup{};
+                if (!again.Open(path, s.folder) ||
+                    !GetFileInformationByHandle(again.file, &afterCleanup) ||
+                    beforeCleanup.dwVolumeSerialNumber !=
+                        afterCleanup.dwVolumeSerialNumber ||
+                    beforeCleanup.nFileIndexHigh != afterCleanup.nFileIndexHigh ||
+                    beforeCleanup.nFileIndexLow != afterCleanup.nFileIndexLow) {
+                    AuditResult(s, AuditOutcome::Kept,
+                                L"file changed before cleanup", path);
+                    return;
+                }
                 AuditOutcome outcome =
-                    RecycleDuplicate(path, generation, capture);
+                    RecycleDuplicate(path, generation, again);
                 AuditResult(s, outcome, outcome == AuditOutcome::RecycledDuplicate
                                 ? L"exact duplicate" : L"duplicate cleanup did not recycle",
                             path);
@@ -2138,6 +2147,8 @@ static void ProcessOne(std::wstring path) {
     // deleting the file would lose the rest. Keep it, the same treatment file/path
     // payloads get.
     if (multiFrame) {
+        Wh_Log(L"Clipboard copy completed; multi-frame image was partly copied%s",
+               s.logDetails ? (L": " + path).c_str() : L"");
         if (deleteRequested) {
             Wh_Log(L"Multi-frame image: copied the first frame only, keeping the file%s",
                    s.logDetails ? (L": " + path).c_str() : L"");

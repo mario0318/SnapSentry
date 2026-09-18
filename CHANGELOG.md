@@ -3,7 +3,7 @@
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
 ## 0.19.7 - unreleased
-- Added opt-in removal of identical repeat screenshots. A byte-for-byte duplicate of one already handled this run is recycled, only after its own copy succeeds. Session-only, and never touches files that were already in the folder.
+- Added opt-in removal of identical recent screenshots in Image clipboard mode. A byte-for-byte duplicate seen in the recent ten-minute window is recycled only after its own copy succeeds. The comparison resets when settings change or folder watching restarts, and never touches files that were already in the folder.
 - Added an audit line in the log for each automatic result: copied, kept, recycled, skipped, or deleted.
 - When Windows cannot deliver the notification, SnapSentry now copies only instead of waiting on a popup that never appears.
 - Fixed a watched-folder path with a stray leading or trailing space being ignored, which left the folder unwatched. Such paths are now trimmed.
