@@ -112,6 +112,9 @@ stored in clipboard history, cloud sync, backups, or other programs.
 - recycle: true
   $name: Delete to the Recycle Bin
   $description: When something is deleted, whether automatically or from the popup buttons, the file goes to the Recycle Bin so you can get it back. Turn this off to delete for good.
+- removeExactDuplicates: false
+  $name: Remove identical recent screenshots
+  $description: Recycles an exact byte-for-byte repeat of a screenshot already handled during this run, only on the automatic action. It never scans or touches files from before this run, and the older copy is kept.
 
 # ---- The popup ----
 - showActionPopup: false
@@ -125,10 +128,6 @@ stored in clipboard history, cloud sync, backups, or other programs.
 - renameFromWindow: false
   $name: Rename screenshots after the active window
   $description: Names each screenshot after the window that was in front when you took it, plus a timestamp, so you can find it later without opening it. The file stays in the same folder.
-- removeExactDuplicates: false
-  $name: Remove identical recent screenshots
-  $description: Recycles an exact byte-for-byte repeat of a screenshot already handled during this run, only on the automatic action. It never scans or touches files from before this run, and the older copy is kept.
-
 # ---- Advanced ----
 - folder: ""
   $name: Folder to watch (leave empty for Screenshots)
@@ -244,7 +243,6 @@ static constexpr ULONGLONG kContentDuplicateWindowMs = 10 * 60 * 1000;
 static constexpr size_t kMaxRecentContent = 64;
 static constexpr size_t kMaxContentBytes = 8 * 1024 * 1024;
 static constexpr size_t kMaxContentCacheBytes = 32 * 1024 * 1024;
-static constexpr bool kDuplicateCleanupValidated = true;
 
 // Pre-seed the recent-name set so a file event we cause ourselves (the rename
 // below) is swallowed by the watcher instead of being handled as a brand-new
@@ -2003,64 +2001,16 @@ public:
     }
 };
 
-static bool RenameLockedCapture(HANDLE file, const std::wstring& destination) {
-    size_t nameBytes = destination.size() * sizeof(wchar_t);
-    size_t bytes = sizeof(FILE_RENAME_INFO) + nameBytes;
-    if (bytes > MAXDWORD) return false;
-    std::vector<BYTE> storage(bytes, 0);
-    auto info = reinterpret_cast<FILE_RENAME_INFO*>(storage.data());
-    info->ReplaceIfExists = FALSE;
-    info->FileNameLength = (DWORD)nameBytes;
-    memcpy(info->FileName, destination.data(), nameBytes);
-    return SetFileInformationByHandle(file, FileRenameInfo, info,
-                                      (DWORD)bytes) != FALSE;
-}
-
-class RecoverySlot {
-public:
-    std::wstring folder;
-    std::wstring file;
-    ~RecoverySlot() { if (!folder.empty()) RemoveDirectoryW(folder.c_str()); }
-    bool Create(const std::wstring& parent, const std::wstring& original) {
-        GUID guid{};
-        wchar_t token[40];
-        if (FAILED(CoCreateGuid(&guid)) ||
-            !StringFromGUID2(guid, token, ARRAYSIZE(token))) return false;
-        std::wstring candidate = parent + L"\\SnapSentry Recovery " + token;
-        if (!CreateDirectoryW(candidate.c_str(), nullptr)) return false;
-        folder = std::move(candidate);
-        file = folder + L"\\" +
-               original.substr(original.find_last_of(L"\\/") + 1);
-        return true;
-    }
-};
-
-static AuditOutcome RecycleDuplicate(const std::wstring& path, const Settings& s,
+static AuditOutcome RecycleDuplicate(const std::wstring& path,
                                      ULONGLONG generation,
                                      LockedCapture& capture) {
     if (WaitStop(0)) return AuditOutcome::Kept;
-    RecoverySlot recovery;
-    if (capture.file == INVALID_HANDLE_VALUE ||
-        !recovery.Create(s.folder, path)) return AuditOutcome::Kept;
-    const std::wstring& staged = recovery.file;
-    if (g_generation.load() != generation || WaitStop(0) ||
-        !RenameLockedCapture(capture.file, staged)) return AuditOutcome::Kept;
-    if (WaitStop(0) || g_generation.load() != generation) {
-        if (!RenameLockedCapture(capture.file, path))
-            Wh_Log(L"Cleanup cancelled; screenshot kept in its recovery folder");
-        return AuditOutcome::Kept;
-    }
+    if (capture.file == INVALID_HANDLE_VALUE) return AuditOutcome::Kept;
     capture.CloseFile();
-    if (RecycleFile(staged)) {
-        return AuditOutcome::RecycledDuplicate;
-    } else {
-        if (!MoveFileExW(staged.c_str(), path.c_str(), 0))
-            Wh_Log(L"Duplicate recycle failed; screenshot kept in its recovery folder");
-        else
-            Wh_Log(L"Duplicate recycle failed, keeping file%s",
-                   s.logDetails ? (L": " + path).c_str() : L"");
-    }
-    return AuditOutcome::Kept;
+    if (g_generation.load() != generation || WaitStop(0))
+        return AuditOutcome::Kept;
+    return RecycleFile(path) ? AuditOutcome::RecycledDuplicate
+                             : AuditOutcome::Kept;
 }
 
 static void ProcessOne(std::wstring path) {
@@ -2111,12 +2061,14 @@ static void ProcessOne(std::wstring path) {
     // the configured clipboard mode. ACTION_AUTO / timeout uses the settings.
     bool forceImage = (action == ACTION_COPY_DELETE);
     LockedCapture capture;
-    bool duplicateCandidate = kDuplicateCleanupValidated &&
-        s.removeExactDuplicates &&
+    bool duplicateCandidate = s.removeExactDuplicates &&
         (forceImage || s.mode == L"image");
-    bool cleanupBlocked = duplicateCandidate && !capture.Open(path, s.folder);
-    // Lack of delete access must not prevent an otherwise valid clipboard copy.
-    // If locking failed, use the existing copy path but never clean up that file.
+    if (duplicateCandidate && !capture.Open(path, s.folder)) {
+        // Lack of delete access must not prevent an otherwise valid clipboard copy
+        // or the configured normal cleanup path. It only disables deduplication
+        // for this file.
+        duplicateCandidate = false;
+    }
 
     bool copied;
     bool multiFrame = false;  // True when only frame 0 of a multi-frame image copied.
@@ -2138,12 +2090,6 @@ static void ProcessOne(std::wstring path) {
         AuditResult(s, AuditOutcome::Skipped, L"clipboard copy failed", path);
         return;  // Invariant: never delete when a requested copy failed.
     }
-    if (cleanupBlocked) {
-        AuditResult(s, AuditOutcome::Kept,
-                    L"duplicate check could not lock the file", path);
-        return;
-    }
-
     bool fullImageCopied = (forceImage || s.mode == L"image") && !multiFrame;
     if (fullImageCopied && duplicateCandidate && !WaitStop(0)) {
         std::array<BYTE, 32> digest;
@@ -2167,7 +2113,7 @@ static void ProcessOne(std::wstring path) {
                     return;
                 }
                 AuditOutcome outcome =
-                    RecycleDuplicate(path, s, generation, capture);
+                    RecycleDuplicate(path, generation, capture);
                 AuditResult(s, outcome, outcome == AuditOutcome::RecycledDuplicate
                                 ? L"exact duplicate" : L"duplicate cleanup did not recycle",
                             path);
@@ -2191,14 +2137,16 @@ static void ProcessOne(std::wstring path) {
     // A multi-page or animated image copied only part of itself (frame 0), so
     // deleting the file would lose the rest. Keep it, the same treatment file/path
     // payloads get.
-    if (deleteRequested && multiFrame) {
-        Wh_Log(L"Multi-frame image: copied the first frame only, keeping the file%s",
-               s.logDetails ? (L": " + path).c_str() : L"");
-        // A popup was in play (an explicit Copy + delete, or letting the countdown
-        // run), so tell the user the file was kept instead of deleted, otherwise the
-        // button is a silent no-op. Fire-and-forget toast; a failure leaves the log.
-        if (s.popup) {
-            ShowKeptToast(BaseName(path));
+    if (multiFrame) {
+        if (deleteRequested) {
+            Wh_Log(L"Multi-frame image: copied the first frame only, keeping the file%s",
+                   s.logDetails ? (L": " + path).c_str() : L"");
+            // A popup was in play (an explicit Copy + delete, or letting the countdown
+            // run), so tell the user the file was kept instead of deleted, otherwise the
+            // button is a silent no-op. Fire-and-forget toast; a failure leaves the log.
+            if (s.popup) {
+                ShowKeptToast(BaseName(path));
+            }
         }
         AuditResult(s, AuditOutcome::Kept,
                     L"multi-frame image was only partly copied", path);
@@ -2684,12 +2632,15 @@ BOOL WhTool_ModInit() {
     g_settingsEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);  // Manual reset.
     g_workEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);    // Auto reset.
     g_toastActionEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // Auto reset.
-    if (!g_stopEvent || !g_reloadEvent || !g_workEvent || !g_toastActionEvent) {
+    if (!g_stopEvent || !g_reloadEvent || !g_settingsEvent || !g_workEvent ||
+        !g_toastActionEvent) {
         if (g_stopEvent) CloseHandle(g_stopEvent);
         if (g_reloadEvent) CloseHandle(g_reloadEvent);
+        if (g_settingsEvent) CloseHandle(g_settingsEvent);
         if (g_workEvent) CloseHandle(g_workEvent);
         if (g_toastActionEvent) CloseHandle(g_toastActionEvent);
-        g_stopEvent = g_reloadEvent = g_workEvent = g_toastActionEvent = nullptr;
+        g_stopEvent = g_reloadEvent = g_settingsEvent = g_workEvent =
+            g_toastActionEvent = nullptr;
         DeleteCriticalSection(&g_lock);
         DeleteCriticalSection(&g_toastLock);
         return FALSE;
@@ -2706,10 +2657,12 @@ BOOL WhTool_ModInit() {
         if (g_workerThread) CloseHandle(g_workerThread);
         CloseHandle(g_stopEvent);
         CloseHandle(g_reloadEvent);
+        CloseHandle(g_settingsEvent);
         CloseHandle(g_workEvent);
         CloseHandle(g_toastActionEvent);
         g_watchThread = g_workerThread = nullptr;
-        g_stopEvent = g_reloadEvent = g_workEvent = g_toastActionEvent = nullptr;
+        g_stopEvent = g_reloadEvent = g_settingsEvent = g_workEvent =
+            g_toastActionEvent = nullptr;
         DeleteCriticalSection(&g_lock);
         DeleteCriticalSection(&g_toastLock);
         return FALSE;
@@ -2748,6 +2701,9 @@ void WhTool_ModUninit() {
     }
     if (g_reloadEvent) {
         CloseHandle(g_reloadEvent);
+    }
+    if (g_settingsEvent) {
+        CloseHandle(g_settingsEvent);
     }
     if (g_workEvent) {
         CloseHandle(g_workEvent);
