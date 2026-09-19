@@ -38,9 +38,10 @@ image with images handled recently by this running SnapSentry instance, within a
 short window of about ten minutes. It works only with the **Image** clipboard
 mode, because that mode makes a durable copy before cleanup. It uses an exact
 byte-for-byte comparison and recycles only the incoming duplicate after its copy
-succeeds. The comparison resets when settings change or folder watching
-restarts. It does not scan the folder or touch files that were already present
-when watching began.
+succeeds. A detected duplicate always goes to the Recycle Bin, even when
+**Delete the screenshot after copying** is off. The comparison resets when
+settings change or folder watching restarts. It does not scan the folder or
+touch files that were already present when watching began.
 
 ## Audit trail
 

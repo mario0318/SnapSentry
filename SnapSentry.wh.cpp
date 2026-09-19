@@ -47,9 +47,10 @@ When **Remove identical recent screenshots** is enabled, SnapSentry compares a
 new image with images handled recently by this running instance, within a short
 window of about ten minutes. It works only with the **Image** clipboard mode,
 because that is the mode that makes a durable copy before cleanup. An exact
-byte-for-byte match is recycled only on the automatic path; the older copy is
-kept. The comparison is session-only and does not scan or touch files that were
-already in the folder when watching began.
+byte-for-byte match is always sent to the Recycle Bin on the automatic path,
+even when **Delete the screenshot after copying** is off. The older copy is kept
+when it still exists. The comparison is session-only and does not scan or touch
+files that were already in the folder when watching began.
 
 ## Which folder it watches
 
@@ -117,7 +118,7 @@ detection keeps only short-lived hashes, not image data.
   $description: When something is deleted, whether automatically or from the popup buttons, the file goes to the Recycle Bin so you can get it back. Turn this off to delete for good.
 - removeExactDuplicates: false
   $name: Remove identical recent screenshots
-  $description: In Image clipboard mode, recycles an exact byte-for-byte repeat seen in the recent ten-minute window, only on the automatic action. The comparison resets when settings change or folder watching restarts. It never scans or touches older files, and the older copy is kept.
+  $description: In Image clipboard mode, recycles an exact byte-for-byte repeat seen in the recent ten-minute window, only on the automatic action. A detected duplicate always goes to the Recycle Bin, even when Delete the screenshot after copying is off. The comparison resets when settings change or folder watching restarts. It never scans or touches older files, and the older copy is kept when it still exists.
 
 # ---- The popup ----
 - showActionPopup: false
@@ -238,6 +239,7 @@ static constexpr ULONGLONG kDuplicateEventWindowMs = 60000;  // Measured from wh
 
 struct RecentContent {
     std::array<BYTE, 32> hash;
+    std::wstring keeper;
     ULONGLONG expires;
 };
 static std::deque<RecentContent> g_recentContent;
@@ -1402,9 +1404,9 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action,
         if (dismissHooked) {
             toast->remove_Dismissed(dismissToken);
         }
-    if (failedHooked) {
-        toast->remove_Failed(failedToken);
-    }
+        if (failedHooked) {
+            toast->remove_Failed(failedToken);
+        }
         return false;
     }
 
@@ -1476,9 +1478,8 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action,
         }
         DWORD remaining = timeoutMs - elapsed;
         // The answer arrives on an event, so wait out the deadline in one go.
-        DWORD slice = remaining;
         DWORD result = MsgWaitForMultipleObjectsEx(
-            ARRAYSIZE(waits), waits, slice, QS_ALLINPUT,
+            ARRAYSIZE(waits), waits, remaining, QS_ALLINPUT,
             MWMO_INPUTAVAILABLE | MWMO_ALERTABLE);
         if (result == WAIT_IO_COMPLETION) {
             continue;  // MWMO_ALERTABLE: an APC ran, keep waiting.
@@ -1517,6 +1518,9 @@ static bool ShowToast(const std::wstring& path, const Settings& s, int& action,
     LeaveCriticalSection(&g_toastLock);
     if (dismissHooked) {
         toast->remove_Dismissed(dismissToken);
+    }
+    if (failedHooked) {
+        toast->remove_Failed(failedToken);
     }
     if (removeToast) notifier->Hide(toast.Get());
     return true;
@@ -1932,20 +1936,24 @@ static bool HashFile(HANDLE file, std::array<BYTE, 32>& digest) {
 }
 
 static bool SeenRecentContentAndRemember(const std::array<BYTE, 32>& hash,
+                                         const std::wstring& path,
                                          ULONGLONG now) {
     while (!g_recentContent.empty() && g_recentContent.front().expires <= now)
         g_recentContent.pop_front();
-    bool duplicate = false;
-    for (const auto& entry : g_recentContent) {
-        if (entry.hash == hash) {
-            duplicate = true;
-            break;
+    for (auto it = g_recentContent.begin(); it != g_recentContent.end();) {
+        if (it->hash != hash) {
+            ++it;
+            continue;
         }
+        if (GetFileAttributesW(it->keeper.c_str()) != INVALID_FILE_ATTRIBUTES) {
+            return true;
+        }
+        it = g_recentContent.erase(it);
     }
-    g_recentContent.push_back({hash, now + kContentDuplicateWindowMs});
+    g_recentContent.push_back({hash, path, now + kContentDuplicateWindowMs});
     while (g_recentContent.size() > kMaxRecentContent)
         g_recentContent.pop_front();
-    return duplicate;
+    return false;
 }
 
 class LockedCapture {
@@ -1965,8 +1973,14 @@ public:
     }
     bool Open(const std::wstring& path, const std::wstring& parent) {
         auto split = path.find_last_of(L"\\/");
+        std::wstring comparisonParent = parent;
+        if (comparisonParent.size() > 1 &&
+            (comparisonParent.back() == L'\\' ||
+             comparisonParent.back() == L'/')) {
+            comparisonParent.pop_back();
+        }
         if (split == std::wstring::npos ||
-            _wcsicmp(path.substr(0, split).c_str(), parent.c_str()) != 0 ||
+            _wcsicmp(path.substr(0, split).c_str(), comparisonParent.c_str()) != 0 ||
             path.find(L':', split) != std::wstring::npos) return false;
         folder = CreateFileW(parent.c_str(), FILE_READ_ATTRIBUTES,
                              FILE_SHARE_READ | FILE_SHARE_WRITE, nullptr,
@@ -1977,9 +1991,9 @@ public:
             !GetFileInformationByHandle(folder, &info) ||
             !(info.dwFileAttributes & FILE_ATTRIBUTE_DIRECTORY) ||
             (info.dwFileAttributes & FILE_ATTRIBUTE_REPARSE_POINT)) return false;
-        file = CreateFileW(path.c_str(), GENERIC_READ | DELETE, FILE_SHARE_READ,
-                           nullptr, OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT,
-                           nullptr);
+        file = CreateFileW(path.c_str(), GENERIC_READ | DELETE,
+                           FILE_SHARE_READ | FILE_SHARE_DELETE, nullptr,
+                           OPEN_EXISTING, FILE_FLAG_OPEN_REPARSE_POINT, nullptr);
         if (file == INVALID_HANDLE_VALUE ||
             !GetFileInformationByHandle(file, &info) ||
             (info.dwFileAttributes & (FILE_ATTRIBUTE_DIRECTORY |
@@ -2076,8 +2090,6 @@ static void ProcessOne(std::wstring path) {
     }
 
     if (!copied) {
-        Wh_Log(L"Clipboard copy failed%s",
-               s.logDetails ? (L": " + path).c_str() : L"");
         AuditResult(s, AuditOutcome::Skipped, L"clipboard copy failed", path);
         return;  // Invariant: never delete when a requested copy failed.
     }
@@ -2088,7 +2100,7 @@ static void ProcessOne(std::wstring path) {
             EnterCriticalSection(&g_lock);
             bool current = generation == g_generation.load();
             bool duplicate = current && SeenRecentContentAndRemember(
-                digest, GetTickCount64());
+                digest, path, GetTickCount64());
             LeaveCriticalSection(&g_lock);
             if (!current) {
                 AuditResult(s, AuditOutcome::Copied,
@@ -2147,11 +2159,7 @@ static void ProcessOne(std::wstring path) {
     // deleting the file would lose the rest. Keep it, the same treatment file/path
     // payloads get.
     if (multiFrame) {
-        Wh_Log(L"Clipboard copy completed; multi-frame image was partly copied%s",
-               s.logDetails ? (L": " + path).c_str() : L"");
         if (deleteRequested) {
-            Wh_Log(L"Multi-frame image: copied the first frame only, keeping the file%s",
-                   s.logDetails ? (L": " + path).c_str() : L"");
             // A popup was in play (an explicit Copy + delete, or letting the countdown
             // run), so tell the user the file was kept instead of deleted, otherwise the
             // button is a silent no-op. Fire-and-forget toast; a failure leaves the log.
@@ -2636,7 +2644,6 @@ static DWORD WINAPI WatchThread(LPVOID) {
 BOOL WhTool_ModInit() {
     InitializeCriticalSection(&g_lock);
     InitializeCriticalSection(&g_toastLock);
-    LoadSettings();
 
     g_stopEvent = CreateEventW(nullptr, TRUE, FALSE, nullptr);   // Manual reset.
     g_reloadEvent = CreateEventW(nullptr, FALSE, FALSE, nullptr);  // Auto reset.
@@ -2657,6 +2664,7 @@ BOOL WhTool_ModInit() {
         return FALSE;
     }
 
+    LoadSettings();
     g_workerThread = CreateThread(nullptr, 0, WorkerThread, nullptr, 0, nullptr);
     g_watchThread = CreateThread(nullptr, 0, WatchThread, nullptr, 0, nullptr);
     if (!g_workerThread || !g_watchThread) {
