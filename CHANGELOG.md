@@ -2,7 +2,11 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
-## 0.19.7 - unreleased
+## 0.21.1 - unreleased
+- Duplicate cleanup always recycles or keeps the file, including when ordinary deletion is set to permanent.
+- Rechecks both files after the countdown and keeps the incoming image if the earlier copy is missing, changed, or unavailable. A file cannot match itself.
+- Settings changes cancel both ordinary and duplicate cleanup countdowns promptly.
+- Releases file and folder handles during countdowns and reuses the hashing provider.
 - Added opt-in removal of identical recent screenshots in Image clipboard mode. A byte-for-byte duplicate seen in the recent ten-minute window is recycled only after its own copy succeeds. The comparison resets when settings change or folder watching restarts, and never touches files that were already in the folder.
 - Added an audit line in the log for each automatic result: copied, kept, recycled, skipped, or deleted.
 - When Windows cannot deliver the notification, SnapSentry now copies only instead of waiting on a popup that never appears.
