@@ -1,101 +1,109 @@
 # SnapSentry
 
-Watches your Windows **Screenshots** folder, wherever it is, or any other folder
-you point it at, and handles new screenshots as they are saved. Copy the image,
-rename the file, delete it after a delay, or choose what to do from a
-notification.
+SnapSentry watches the Windows Screenshots folder and handles new screenshots as
+they are saved. It can copy the image, delete the saved file after a delay, or let
+you choose from a notification.
 
-![The SnapSentry notification](https://raw.githubusercontent.com/mario0318/SnapSentry/9f28c82bb5b901c399d6773ea8a2e09195bc3f1a/assets/notification-rename.png)
+## Actions
+
+- **Delete now** removes the file without changing the clipboard.
+- **Copy image and delete** copies the image, then removes the file.
+- **Keep** leaves the screenshot alone.
+- If nothing is selected, the configured automatic action runs after the delay.
+
+Deletion is off by default, since it is the irreversible part; turn on **Delete the
+saved screenshot** to opt in. When it is on, deletion sends the file to the Recycle
+Bin so an accidental delete is recoverable, unless you turn that off for a permanent
+delete.
 
 ## Clipboard modes
 
-* **Image** copies the picture so it stays pasteable even after the file is deleted.
-  For a multi-page or animated image only the first frame is copied, so the file is
-  kept rather than deleted.
-* **File** copies the file for pasting into File Explorer. Deletion is disabled.
-* **Path** copies the full path as text. You can pick plain text, a quoted path, a
-  file link, or a Markdown image link, which is handy for pasting a screenshot
-  straight into notes or a bug report. Deletion is disabled.
-* **None** leaves the clipboard unchanged.
+- **Image** copies a bitmap that remains pasteable after the file is deleted.
+- **File** copies the file for pasting into File Explorer. Deletion is disabled.
+- **Path** copies the location as text. Deletion is disabled. You can choose how
+  the path is written: plain, quoted, as a clickable file link, or as a Markdown
+  image reference.
+- **None** leaves the clipboard unchanged.
 
 ## Naming
 
-You can have SnapSentry rename each new screenshot from the window that was in
-front when it was taken, together with a timestamp, so a file ends up named for
-what it shows instead of Screenshot (1). The file stays in the same folder.
+SnapSentry can rename each new screenshot using the title of the window that was
+in front when it was taken, so files read like `2026-08-01 17-16-52 Preview.png`
+instead of `Screenshot (12).png`. This is optional and off by default.
 
 ## Identical recent screenshots
 
-When **Remove identical recent screenshots** is enabled, SnapSentry compares a
-new image with images handled recently by this running instance, within a short
-window of about ten minutes. It works only with the **Image** clipboard mode,
-because that is the mode that makes a durable copy before cleanup. An exact
-byte-for-byte match is always sent to the Recycle Bin on the automatic path,
-even when **Delete the screenshot after copying** is off or ordinary deletion
-is set to permanent. If recycling fails, the duplicate stays in place. The older
-copy must still contain the same bytes when cleanup runs. If normal deletion is
-on, it usually removes each earlier copy before a later identical image arrives,
-so there may be no keeper for duplicate cleanup to find. The comparison is
-limited to 64 recent entries, resets when settings change or folder watching
-restarts, and does not scan or touch files that were already in the folder when
-watching began. Images with different embedded metadata are kept even if they
-look the same.
+The optional **Remove identical recent screenshots** setting compares each new
+image with images handled recently by this running SnapSentry instance, within a
+short window of about ten minutes. It works only with the **Image** clipboard
+mode, because that mode makes a durable copy before cleanup. It uses an exact
+byte-for-byte comparison and recycles only the incoming duplicate after its copy
+succeeds. A detected duplicate always goes to the Recycle Bin, even when
+**Delete the screenshot after copying** is off or ordinary deletion is set to
+permanent. If recycling fails, the duplicate stays in place. The earlier copy
+must still have identical contents when cleanup runs. The comparison keeps up to
+64 recent entries and resets when settings change or folder watching restarts.
+Normal auto-delete usually removes earlier copies before a duplicate arrives.
+Images with different embedded metadata are kept even if they look the same.
+It does not scan the folder or touch files already present when watching began.
 
-## Which folder it watches
+Changing settings cancels pending cleanup, including the ordinary delete-after-copy
+countdown. Disabling the mod also cancels pending cleanup.
 
-By default this is your Windows Screenshots folder, wherever Windows keeps it. In
-the settings you can type the full path to any folder instead, and shortcuts like
-%USERPROFILE% are filled in for you. Every new image that arrives in the folder you
-choose is treated the same way, so pick one where screenshots land rather than one
-that collects downloads. The image types treated as new screenshots are .png, .jpg,
-.jpeg, .jfif, .bmp, .gif, .webp, .tif, and .tiff; with deletion on, only freshly
-created files of these types are ever removed, so it is worth knowing when you pick a
-folder.
+## Audit trail
 
-## The notification
-
-The popup is a real Windows notification, so it matches your light or dark theme.
-While the popup is turned on, SnapSentry leaves two things on your machine so the
-notification buttons work, a SnapSentry shortcut in your Start Menu programs
-folder and one registry entry. Turning the popup off or disabling the mod removes
-both again. If the notification can't be shown, SnapSentry falls back
-to a standard dialog. If you have turned its notifications off, it takes
-that as a cue to stay quiet: it still copies to the clipboard but shows no dialog
-and never auto deletes. A multi-page or animated image is kept rather than
-deleted, because only its first frame can go on the clipboard, and afterwards a
-short notice says so, when the notification is available.
-
-## Privacy
-
-SnapSentry treats any supported image written into the watched folder in about the
-last half minute as a new screenshot. Files that were already there, and copies of
-older images dragged in or synced from another device, are left alone. A brand new
-file saved or downloaded straight into the folder cannot be told apart from a
-capture, so avoid pointing the folder at a place where downloads land. By default a
-deleted screenshot goes to the Recycle Bin so it can be restored; if you turn that
-off, deletion is permanent. Deleting a screenshot does not remove copies already
-stored in clipboard history, cloud sync, backups, or other programs. Duplicate
-detection keeps only short-lived hashes, not image data.
-
-## Installation
-
-Install it from the Windhawk catalog at
-[windhawk.net/mods/snap-sentry](https://windhawk.net/mods/snap-sentry).
-`SnapSentry.wh.cpp` here is the same source, so it can also be pasted into
-Windhawk's **Create a new mod** editor and compiled. Snipping Tool has to be set
-to save screenshots automatically for there to be anything to handle.
+SnapSentry writes one final-result audit line for each handled screenshot. It
+records whether the file was copied, kept, recycled, recycled as an exact
+duplicate, skipped, or permanently deleted. Failed cleanup is recorded as kept.
+Paths stay out of these lines unless verbose logging is enabled. Audit results
+are log-only, so popup-off keeps SnapSentry's no-footprint behavior.
 
 ## Development roadmap
 
-SnapSentry is staying a small, local screenshot tool. Exact duplicate detection
-for screenshots from the current session shipped in 0.21.1. From here the likely
-direction is clearer naming, clipboard shortcuts, and better handling of short
-screenshot bursts. Folder-wide retention is deliberately not next. If it is added
-later, it will need a separate opt-in design that only acts on files SnapSentry
-can prove it observed, never a blanket cleanup of an existing screenshot folder.
+SnapSentry is staying a small, local screenshot tool. Future work will focus on
+clearer naming, clipboard shortcuts, and better handling of short screenshot
+bursts. Folder-wide retention is deliberately not the next feature. If it is
+added later, it will need a separate opt-in design that only acts on files
+SnapSentry can prove it observed, never a blanket cleanup of an existing
+screenshot folder.
 
 If you want to work in one of these areas, please open an issue first so changes
 can stay compatible with the safety rules above.
+
+## Setup
+
+Snipping Tool must be set to save screenshots automatically. The default folder
+is `Pictures\Screenshots`. If Snipping Tool saves to any other directory, set **Folder
+override** to that location.
+
+While the action popup is turned on, SnapSentry registers itself with Windows so
+its notification buttons work. If the notification can't be shown, SnapSentry falls
+back to a standard dialog; but if you have turned its notifications off, it stays
+quiet instead, still copying to the clipboard but showing no dialog and never auto
+deleting. Turning the popup off, or disabling the mod, removes that registration
+again, so it leaves nothing behind.
+
+## Privacy
+
+SnapSentry treats any supported image written into the watched folder within the
+last few seconds as a new screenshot. Files that were already there, and copies of
+older images dragged in by hand or synced from another device, are left alone. A
+brand new file saved or downloaded straight into the folder cannot be told apart
+from a capture, so avoid pointing the folder override at a place where downloads
+land. Duplicate detection keeps only short-lived hashes, not image data. It cannot remove copies
+already retained by clipboard history, cloud sync, backups, or other applications.
+Deleting a file is not secure erasure, especially on an SSD. When the Recycle Bin
+option is on, a deleted screenshot stays recoverable there until the bin is emptied.
+
+Avoid a cloud-synced screenshot folder when quick deletion matters. A sync client
+may upload or retain the image before the local file is removed.
+
+## Installation
+
+Paste `SnapSentry.wh.cpp` into Windhawk's **Create a new mod** editor and compile
+it. Supported formats are PNG, JPEG, JFIF, BMP, GIF, WebP, and TIFF. When copying the
+picture, a multi-frame image such as a multi-page TIFF or animated GIF is kept rather
+than deleted, since only its first frame can be put on the clipboard.
 
 ## License
 

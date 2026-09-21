@@ -3,12 +3,14 @@
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
 ## 0.21.1 - 2026-09-21
-- Added an optional setting to remove duplicate screenshots. When the same image is captured again, the extra copy is moved to the Recycle Bin so the folder does not fill up with identical shots. It is off by default.
-- Only exact, byte-for-byte duplicates taken during the current session are removed, and only while SnapSentry is set to copy the image itself. Files that were already in the folder are left alone.
-- A removed duplicate always goes to the Recycle Bin so it can be restored, even when normal deletion is set to permanent. The earlier copy is kept, and SnapSentry confirms it is still there before removing anything.
-- The log now records the outcome for each screenshot: copied, kept, recycled, skipped, or deleted.
-- Screenshots are still copied to the clipboard when Windows cannot show a notification.
-- Fixed a watched folder being ignored when its path had a stray space at the start or end.
+- Duplicate cleanup always recycles or keeps the file, including when ordinary deletion is set to permanent.
+- Rechecks both files after the countdown and keeps the incoming image if the earlier copy is missing, changed, or unavailable. A file cannot match itself.
+- Settings changes cancel both ordinary and duplicate cleanup countdowns promptly.
+- Releases file and folder handles during countdowns and reuses the hashing provider.
+- Added opt-in removal of identical recent screenshots in Image clipboard mode. A byte-for-byte duplicate seen in the recent ten-minute window is recycled only after its own copy succeeds. The comparison resets when settings change or folder watching restarts, and never touches files that were already in the folder.
+- Added an audit line in the log for each automatic result: copied, kept, recycled, skipped, or deleted.
+- When Windows cannot deliver the notification, SnapSentry now copies only instead of waiting on a popup that never appears.
+- Fixed a watched-folder path with a stray leading or trailing space being ignored, which left the folder unwatched. Such paths are now trimmed.
 
 ## 0.18.8 - 2026-08-24
 - When a multi-page or animated image is kept instead of deleted, a notice now says so; before, that only appeared in the log.
