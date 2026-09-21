@@ -2,6 +2,14 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
+## 0.21.1 - 2026-09-21
+- Added an optional setting to remove duplicate screenshots. When the same image is captured again, the extra copy is moved to the Recycle Bin so the folder does not fill up with identical shots. It is off by default.
+- Only exact, byte-for-byte duplicates taken during the current session are removed, and only while SnapSentry is set to copy the image itself. Files that were already in the folder are left alone.
+- A removed duplicate always goes to the Recycle Bin so it can be restored, even when normal deletion is set to permanent. The earlier copy is kept, and SnapSentry confirms it is still there before removing anything.
+- The log now records the outcome for each screenshot: copied, kept, recycled, skipped, or deleted.
+- Screenshots are still copied to the clipboard when Windows cannot show a notification.
+- Fixed a watched folder being ignored when its path had a stray space at the start or end.
+
 ## 0.18.8 - 2026-08-24
 - When a multi-page or animated image is kept instead of deleted, a notice now says so; before, that only appeared in the log.
 - More reliable folder watching on network or sync-backed locations that don't deliver change notifications.
