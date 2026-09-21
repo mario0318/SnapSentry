@@ -2,7 +2,7 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
-## 0.21.1 - unreleased
+## 0.21.1 - 2026-09-21
 - Duplicate cleanup always recycles or keeps the file, including when ordinary deletion is set to permanent.
 - Rechecks both files after the countdown and keeps the incoming image if the earlier copy is missing, changed, or unavailable. A file cannot match itself.
 - Settings changes cancel both ordinary and duplicate cleanup countdowns promptly.
