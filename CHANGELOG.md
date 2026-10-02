@@ -3,9 +3,10 @@
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
 ## 0.21.3 - unreleased
-- A settings change just as a screenshot lands no longer skips copying it, the new settings are used instead.
-- A duplicate that is kept is now remembered, so a later identical screenshot is still caught after the first copy is gone.
-- The log now says when the duplicate check is skipped because a screenshot couldn't be opened.
+- A screenshot taken just as settings change now follows the new settings instead of being skipped.
+- Turning the notification on while a screenshot is being handled now shows it instead of the dialog.
+- A duplicate that was kept is remembered, even if the earlier copy was edited, so a later identical screenshot is still caught.
+- The log now notes when a screenshot can't be checked for duplicates.
 
 ## 0.21.1 - 2026-09-21
 - Duplicate cleanup always recycles or keeps the file, including when ordinary deletion is set to permanent.
