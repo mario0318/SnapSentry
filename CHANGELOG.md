@@ -2,6 +2,11 @@
 
 Notable changes to SnapSentry, by published version. Dates are catalog release dates.
 
+## 0.21.3 - unreleased
+- A settings change just as a screenshot lands no longer skips copying it, the new settings are used instead.
+- A duplicate that is kept is now remembered, so a later identical screenshot is still caught after the first copy is gone.
+- The log now says when the duplicate check is skipped because a screenshot couldn't be opened.
+
 ## 0.21.1 - 2026-09-21
 - Duplicate cleanup always recycles or keeps the file, including when ordinary deletion is set to permanent.
 - Rechecks both files after the countdown and keeps the incoming image if the earlier copy is missing, changed, or unavailable. A file cannot match itself.
